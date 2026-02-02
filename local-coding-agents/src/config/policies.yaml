@@ -1,0 +1,326 @@
+# Policies Configuration
+# Security and behavioral policies that govern agent operations
+# These policies are enforced at the system level and cannot be bypassed
+
+# =============================================================================
+# FILE ACCESS POLICIES
+# Controls which files agents can access
+# =============================================================================
+file_access:
+  # Allowed file extensions for modification
+  # Files with other extensions are read-only
+  allowed_extensions:
+    - ".py"
+    - ".js"
+    - ".ts"
+    - ".jsx"
+    - ".tsx"
+    - ".json"
+    - ".yaml"
+    - ".yml"
+    - ".md"
+    - ".txt"
+    - ".html"
+    - ".css"
+    - ".scss"
+    - ".sql"
+    - ".sh"
+    - ".bash"
+    - ".toml"
+    - ".ini"
+    - ".cfg"
+    - ".conf"
+    - ".xml"
+    - ".rs"
+    - ".go"
+    - ".java"
+    - ".c"
+    - ".cpp"
+    - ".h"
+    - ".hpp"
+    - ".rb"
+
+  # Blocked file patterns (glob patterns)
+  # These files cannot be read or written
+  blocked_patterns:
+    # Security-sensitive files
+    - "*.pem"
+    - "*.key"
+    - "*.crt"
+    - "*.p12"
+    - "*.pfx"
+    - "*.env"
+    - "*.env.*"
+    - ".env*"
+    - "*secret*"
+    - "*password*"
+    - "*credential*"
+    - "*token*"
+    - "*.secrets"
+    # SSH and security
+    - ".ssh/*"
+    - "*_rsa"
+    - "*_dsa"
+    - "*_ecdsa"
+    - "*_ed25519"
+    - "authorized_keys"
+    - "known_hosts"
+    # Build artifacts
+    - "__pycache__/*"
+    - "*.pyc"
+    - "*.pyo"
+    - "*.so"
+    - "*.dylib"
+    - "*.dll"
+    - "*.exe"
+    - "node_modules/*"
+    - "dist/*"
+    - "build/*"
+    - ".git/objects/*"
+    - ".git/hooks/*"
+    # IDE and editor
+    - ".vscode/settings.json"
+    - ".idea/*"
+    # System files
+    - ".DS_Store"
+    - "Thumbs.db"
+
+  # Read-only paths (can read but not modify)
+  # Relative to workspace root
+  read_only_paths:
+    - "LICENSE"
+    - "LICENSE.*"
+    - ".gitignore"
+    - ".gitattributes"
+
+  # Paths that are completely off-limits
+  # Files here cannot even be read
+  forbidden_paths:
+    - "../"  # No parent directory access
+    - "/etc"
+    - "/var"
+    - "/usr"
+    - "/System"
+    - "/Library"
+    - "~/.config"
+    - "~/.local"
+
+# =============================================================================
+# AGENT POLICIES
+# Behavioral constraints for each agent type
+# =============================================================================
+agents:
+  # Planner agent policies
+  planner:
+    # Planner cannot generate code
+    can_generate_code: false
+    # Planner cannot access files directly
+    can_access_files: true  # Read only for understanding
+    can_modify_files: false
+    # Planner cannot execute tools
+    can_execute_tools: false
+    # Output constraints
+    max_subtasks: 10
+    require_acceptance_criteria: true
+    require_file_targets: true
+
+  # Coder agent policies
+  coder:
+    can_generate_code: true
+    can_access_files: true
+    can_modify_files: false  # Through diff engine only
+    can_execute_tools: false
+    # Must output structured diffs
+    require_diff_output: true
+    # Code quality requirements
+    require_docstrings: true
+    require_type_hints: true
+    max_function_length: 50  # lines
+    max_file_length: 500    # lines
+
+  # Reviewer agent policies
+  reviewer:
+    can_generate_code: false
+    can_access_files: true
+    can_modify_files: false
+    can_execute_tools: false
+    # Review requirements
+    must_cite_lines: true
+    require_structured_feedback: true
+    allowed_verdicts:
+      - "APPROVE"
+      - "REQUEST_CHANGES"
+      - "REJECT"
+
+  # Fixer agent policies
+  fixer:
+    can_generate_code: true
+    can_access_files: true
+    can_modify_files: false  # Through diff engine only
+    can_execute_tools: false
+    # Fixer constraints
+    require_diff_output: true
+    max_lines_per_fix: 50
+    must_address_feedback: true
+    no_new_features: true  # Only fix cited issues
+
+# =============================================================================
+# TOOL POLICIES
+# Controls which tools can be used and how
+# =============================================================================
+tools:
+  # Filesystem tool
+  filesystem:
+    enabled: true
+    read_enabled: true
+    write_enabled: true
+    delete_enabled: true
+    max_file_size_bytes: 10485760
+    require_backup: true
+
+  # Shell tool
+  shell:
+    enabled: true
+    # Allowed commands (whitelist)
+    allowed_commands:
+      - "ls"
+      - "cat"
+      - "head"
+      - "tail"
+      - "grep"
+      - "find"
+      - "wc"
+      - "sort"
+      - "uniq"
+      - "diff"
+      - "tree"
+      - "pwd"
+      - "echo"
+      - "python"
+      - "python3"
+      - "pip"
+      - "pip3"
+      - "pytest"
+      - "mypy"
+      - "ruff"
+      - "black"
+      - "npm"
+      - "node"
+      - "npx"
+      - "git"
+    # Blocked commands (blacklist - takes precedence)
+    blocked_commands:
+      - "rm -rf"
+      - "sudo"
+      - "su"
+      - "chmod"
+      - "chown"
+      - "curl"
+      - "wget"
+      - "ssh"
+      - "scp"
+      - "rsync"
+      - "eval"
+      - "exec"
+      - "source"
+      - "."
+    # Maximum execution time per command
+    max_execution_seconds: 60
+    # Capture output
+    capture_output: true
+    max_output_size_bytes: 1048576
+
+  # Testing tool
+  testing:
+    enabled: true
+    # Test frameworks
+    frameworks:
+      - "pytest"
+      - "unittest"
+      - "jest"
+      - "mocha"
+    # Maximum test execution time
+    max_test_seconds: 300
+    # Maximum tests per run
+    max_tests_per_run: 100
+    # Require tests to pass before completion
+    require_passing_tests: false  # Can be set to true
+
+# =============================================================================
+# SAFETY POLICIES
+# System-level safety constraints
+# =============================================================================
+safety:
+  # No self-modification
+  # The agent system cannot modify its own code
+  no_self_modification: true
+  self_modification_patterns:
+    - "src/core/*"
+    - "src/agents/*"
+    - "src/orchestration/*"
+    - "src/tools/*"
+    - "src/state/*"
+    - "src/config/*"
+    - "src/main.py"
+
+  # Prompt injection protection
+  prompt_injection:
+    # Sanitize all inputs
+    sanitize_inputs: true
+    # Block known injection patterns
+    block_patterns:
+      - "ignore previous instructions"
+      - "ignore all previous"
+      - "disregard above"
+      - "forget everything"
+      - "new instructions:"
+      - "system prompt:"
+      - "you are now"
+      - "act as if"
+
+  # Output validation
+  output_validation:
+    # Validate all agent outputs
+    validate_outputs: true
+    # Block sensitive data in outputs
+    block_sensitive_patterns:
+      - "password"
+      - "secret"
+      - "api_key"
+      - "token"
+      - "credential"
+
+  # Rollback requirements
+  rollback:
+    # Always enable rollback capability
+    always_enabled: true
+    # Create checkpoint before each agent
+    checkpoint_before_agent: true
+    # Maximum rollback depth
+    max_rollback_depth: 10
+
+# =============================================================================
+# AUDIT POLICIES
+# Logging and audit trail requirements
+# =============================================================================
+audit:
+  # Log all agent inputs and outputs
+  log_agent_io: true
+  
+  # Log all file operations
+  log_file_operations: true
+  
+  # Log all tool invocations
+  log_tool_calls: true
+  
+  # Log all LLM calls
+  log_llm_calls: true
+  
+  # Redact sensitive data in logs
+  redact_sensitive: true
+  
+  # Retention period (days)
+  retention_days: 30
+  
+  # Export format
+  export_format: "jsonl"

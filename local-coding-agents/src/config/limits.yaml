@@ -1,0 +1,150 @@
+# Limits Configuration
+# Hard limits to ensure safety, determinism, and resource management
+# These limits CANNOT be overridden via prompt injection
+
+# =============================================================================
+# TOKEN LIMITS
+# Controls token usage to prevent runaway generation and manage memory
+# =============================================================================
+tokens:
+  # Maximum tokens per single LLM completion
+  max_per_completion: 4096
+  
+  # Maximum tokens per agent execution (sum of all completions)
+  max_per_agent:
+    planner: 8000
+    coder: 16000
+    reviewer: 8000
+    fixer: 8000
+  
+  # Maximum tokens per entire run (sum of all agents)
+  max_per_run: 50000
+  
+  # Context window management
+  context:
+    # Reserved for system prompts
+    system_reserved: 500
+    # Reserved for model's response
+    response_reserved: 2048
+    # Maximum context items
+    max_items: 50
+
+# =============================================================================
+# ITERATION LIMITS
+# Prevents infinite loops in agent orchestration
+# =============================================================================
+iterations:
+  # Maximum times the orchestration loop can run
+  max_loop_iterations: 10
+  
+  # Maximum retries for a single agent
+  max_agent_retries: 3
+  
+  # Maximum fix attempts after review failure
+  max_fix_iterations: 5
+  
+  # Maximum planning refinement cycles
+  max_planning_cycles: 3
+
+# =============================================================================
+# FILE LIMITS
+# Controls file system access scope
+# =============================================================================
+files:
+  # Maximum files that can be modified in a single run
+  max_modified_per_run: 50
+  
+  # Maximum files that can be modified by a single agent
+  max_modified_per_agent: 10
+  
+  # Maximum files that can be touched per task
+  max_per_task: 5
+  
+  # Maximum file size for reading (bytes)
+  max_read_size_bytes: 10485760  # 10MB
+  
+  # Maximum file size for writing (bytes)
+  max_write_size_bytes: 1048576  # 1MB
+  
+  # Maximum lines per file for code generation
+  max_lines_per_file: 1000
+  
+  # Maximum total lines changed per run
+  max_total_lines_changed: 5000
+
+# =============================================================================
+# TIME LIMITS
+# Prevents hung operations
+# =============================================================================
+time:
+  # Maximum time for a single LLM call (seconds)
+  max_llm_call_seconds: 300
+  
+  # Maximum time for a single agent (seconds)
+  max_agent_seconds: 600
+  
+  # Maximum time for entire run (seconds)
+  max_run_seconds: 3600  # 1 hour
+  
+  # Timeout for tool operations (seconds)
+  tool_timeout_seconds: 60
+  
+  # Rate limiting: max operations per minute
+  max_operations_per_minute: 100
+
+# =============================================================================
+# DIFF LIMITS
+# Controls code change scope
+# =============================================================================
+diffs:
+  # Maximum hunks (change regions) per file
+  max_hunks_per_file: 50
+  
+  # Maximum lines per hunk
+  max_lines_per_hunk: 500
+  
+  # Maximum total lines changed per diff
+  max_lines_per_diff: 1000
+  
+  # Require backup before applying diff
+  require_backup: true
+  
+  # Validate diff before applying
+  validate_before_apply: true
+
+# =============================================================================
+# TASK LIMITS
+# Controls task decomposition
+# =============================================================================
+tasks:
+  # Maximum subtasks from planner
+  max_subtasks: 10
+  
+  # Maximum depth of task tree
+  max_task_depth: 3
+  
+  # Maximum concurrent tasks (for future parallel execution)
+  max_concurrent: 1  # Sequential only for now
+  
+  # Minimum subtask description length
+  min_subtask_description: 10
+  
+  # Maximum subtask description length
+  max_subtask_description: 500
+
+# =============================================================================
+# MEMORY LIMITS
+# Controls memory usage
+# =============================================================================
+memory:
+  # Maximum size for file cache (bytes)
+  max_file_cache_bytes: 52428800  # 50MB
+  
+  # Maximum checkpoint size (bytes)
+  max_checkpoint_size_bytes: 10485760  # 10MB
+  
+  # Maximum checkpoints to retain
+  max_checkpoints_per_run: 20
+  
+  # Maximum log file size (bytes)
+  max_log_size_bytes: 10485760  # 10MB

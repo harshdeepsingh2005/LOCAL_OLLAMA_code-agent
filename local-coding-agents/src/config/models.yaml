@@ -1,0 +1,95 @@
+# Model Configuration
+# Defines available models and their parameters for local inference via Ollama
+# Only ONE model is resident in memory at a time (hot-swapped as needed)
+
+# Default model for all agents (can be overridden per-agent)
+default_model: "qwen2.5-coder:7b-instruct-q4_K_M"
+
+# Model definitions
+# Each model should be a 7B-8B parameter quantized model (Q4/Q5)
+# to fit within 16GB RAM on Apple Silicon
+models:
+  # Primary coding model - recommended default
+  qwen2.5-coder:
+    name: "qwen2.5-coder:7b-instruct-q4_K_M"
+    context_length: 8192
+    temperature: 0.1
+    top_p: 0.9
+    top_k: 40
+    repeat_penalty: 1.1
+    num_predict: 2048
+    num_ctx: 8192
+    description: "Qwen 2.5 Coder 7B - excellent for code generation"
+    recommended_for:
+      - coder
+      - fixer
+
+  # Code Llama - good for general coding
+  codellama:
+    name: "codellama:7b-instruct-q4_K_M"
+    context_length: 4096
+    temperature: 0.1
+    top_p: 0.9
+    top_k: 40
+    repeat_penalty: 1.1
+    num_predict: 2048
+    num_ctx: 4096
+    description: "Code Llama 7B - Meta's code-focused model"
+    recommended_for:
+      - coder
+      - fixer
+
+  # DeepSeek Coder - good for reasoning
+  deepseek-coder:
+    name: "deepseek-coder:6.7b-instruct-q4_K_M"
+    context_length: 4096
+    temperature: 0.1
+    top_p: 0.9
+    top_k: 40
+    repeat_penalty: 1.1
+    num_predict: 2048
+    num_ctx: 4096
+    description: "DeepSeek Coder 6.7B - strong reasoning capabilities"
+    recommended_for:
+      - planner
+      - reviewer
+
+  # Mistral - good for planning and review
+  mistral:
+    name: "mistral:7b-instruct-q4_K_M"
+    context_length: 4096
+    temperature: 0.2
+    top_p: 0.9
+    top_k: 40
+    repeat_penalty: 1.1
+    num_predict: 2048
+    num_ctx: 4096
+    description: "Mistral 7B - balanced general-purpose model"
+    recommended_for:
+      - planner
+      - reviewer
+
+# Agent-specific model overrides
+# If not specified, default_model is used
+agent_models:
+  planner: null   # Uses default_model
+  coder: null     # Uses default_model
+  reviewer: null  # Uses default_model
+  fixer: null     # Uses default_model
+
+# Ollama connection settings
+ollama:
+  base_url: "http://localhost:11434"
+  timeout_seconds: 300
+  connect_timeout_seconds: 30
+  keepalive_connections: 5
+  max_connections: 10
+
+# Model management settings
+model_management:
+  # Automatically load the default model on startup
+  preload_default: true
+  # Wait time for model to load (seconds)
+  load_timeout: 120
+  # Health check interval (seconds)
+  health_check_interval: 30
