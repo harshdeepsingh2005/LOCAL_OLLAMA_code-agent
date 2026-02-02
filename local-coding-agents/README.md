@@ -6,6 +6,25 @@ Designed for Apple Silicon (M-series, 16GB RAM) • Fully offline • Determinis
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Install dependencies
+pip install -e .
+
+# 2. Ensure Ollama is running with a model
+ollama pull qwen2.5-coder:7b-instruct-q4_K_M
+ollama serve
+
+# 3. Run a task
+lca run "Create a Python function that calculates fibonacci numbers"
+
+# 4. Check status
+lca status
+```
+
+---
+
 ## Overview
 
 Local Coding Agents (LCA) is a commercial-grade coding assistant that runs entirely on your local machine using Ollama for LLM inference. It implements a strict separation of concerns between agents, tools, orchestration, and state management.
