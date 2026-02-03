@@ -1,6 +1,7 @@
 # Model Configuration
 # Defines available models and their parameters for local inference via Ollama
-# Only ONE model is resident in memory at a time (hot-swapped as needed)
+# CRITICAL: Only ONE model is resident in memory at a time
+# Models are unloaded between calls to stay within 16GB RAM
 
 # Default model for all agents (can be overridden per-agent)
 default_model: "qwen2.5-coder:7b-instruct-q4_K_M"
@@ -9,7 +10,21 @@ default_model: "qwen2.5-coder:7b-instruct-q4_K_M"
 # Each model should be a 7B-8B parameter quantized model (Q4/Q5)
 # to fit within 16GB RAM on Apple Silicon
 models:
-  # Primary coding model - recommended default
+  # DeepSeek R1 Distill - excellent for planning/reasoning
+  deepseek-r1-distill-qwen:
+    name: "deepseek-r1-distill-qwen:7b-q4"
+    context_length: 8192
+    temperature: 0.2
+    top_p: 0.9
+    top_k: 40
+    repeat_penalty: 1.1
+    num_predict: 2048
+    num_ctx: 8192
+    description: "DeepSeek R1 Distill Qwen 7B - excellent reasoning for planning"
+    recommended_for:
+      - planner
+
+  # Qwen 2.5 Coder - primary coding model
   qwen2.5-coder:
     name: "qwen2.5-coder:7b-instruct-q4_K_M"
     context_length: 8192
@@ -19,63 +34,47 @@ models:
     repeat_penalty: 1.1
     num_predict: 2048
     num_ctx: 8192
-    description: "Qwen 2.5 Coder 7B - excellent for code generation"
+    description: "Qwen 2.5 Coder 7B - excellent for code generation and fixing"
     recommended_for:
       - coder
       - fixer
 
-  # Code Llama - good for general coding
-  codellama:
-    name: "codellama:7b-instruct-q4_K_M"
-    context_length: 4096
+  # Llama 3.1 - good for review
+  llama3.1:
+    name: "llama3.1:8b-instruct-q4_K_M"
+    context_length: 8192
     temperature: 0.1
     top_p: 0.9
     top_k: 40
     repeat_penalty: 1.1
     num_predict: 2048
-    num_ctx: 4096
-    description: "Code Llama 7B - Meta's code-focused model"
+    num_ctx: 8192
+    description: "Llama 3.1 8B - balanced model for code review"
     recommended_for:
-      - coder
-      - fixer
+      - reviewer
 
-  # DeepSeek Coder - good for reasoning
-  deepseek-coder:
-    name: "deepseek-coder:6.7b-instruct-q4_K_M"
+  # Phi-3 Mini - lightweight utility model
+  phi-3:
+    name: "phi3:mini-q4_K_M"
     context_length: 4096
     temperature: 0.1
     top_p: 0.9
     top_k: 40
     repeat_penalty: 1.1
-    num_predict: 2048
+    num_predict: 1024
     num_ctx: 4096
-    description: "DeepSeek Coder 6.7B - strong reasoning capabilities"
+    description: "Phi-3 Mini - lightweight utility model"
     recommended_for:
-      - planner
-      - reviewer
+      - utility
 
-  # Mistral - good for planning and review
-  mistral:
-    name: "mistral:7b-instruct-q4_K_M"
-    context_length: 4096
-    temperature: 0.2
-    top_p: 0.9
-    top_k: 40
-    repeat_penalty: 1.1
-    num_predict: 2048
-    num_ctx: 4096
-    description: "Mistral 7B - balanced general-purpose model"
-    recommended_for:
-      - planner
-      - reviewer
-
-# Agent-specific model overrides
-# If not specified, default_model is used
+# Agent-specific model assignments (RECOMMENDED)
+# Uses specialized models for each agent role
 agent_models:
-  planner: null   # Uses default_model
-  coder: null     # Uses default_model
-  reviewer: null  # Uses default_model
-  fixer: null     # Uses default_model
+  planner: "deepseek-r1-distill-qwen:7b-q4"
+  coder: "qwen2.5-coder:7b-instruct-q4_K_M"
+  reviewer: "llama3.1:8b-instruct-q4_K_M"
+  fixer: "qwen2.5-coder:7b-instruct-q4_K_M"
+  utility: "phi3:mini-q4_K_M"
 
 # Ollama connection settings
 ollama:
@@ -86,10 +85,15 @@ ollama:
   max_connections: 10
 
 # Model management settings
+# CRITICAL: Unload models between calls to stay within 16GB RAM
 model_management:
   # Automatically load the default model on startup
-  preload_default: true
+  preload_default: false  # Disabled - load on demand only
   # Wait time for model to load (seconds)
   load_timeout: 120
   # Health check interval (seconds)
   health_check_interval: 30
+  # CRITICAL: Unload model after each completion to free RAM
+  unload_after_completion: true
+  # Keep model loaded for this many seconds before unloading (0 = immediate)
+  keep_alive_seconds: 0

@@ -7,6 +7,7 @@ Handles model hot-swapping, connection management, and response streaming.
 Design Decisions:
 - Synchronous HTTP client (httpx) for deterministic behavior
 - Single model resident at a time to respect 16GB RAM constraint
+- CRITICAL: Unload models between calls to prevent OOM on 16GB systems
 - Automatic retry with exponential backoff
 - Token counting for budget enforcement
 """
@@ -38,6 +39,7 @@ class ModelRole(str, Enum):
     CODER = "coder"
     REVIEWER = "reviewer"
     FIXER = "fixer"
+    UTILITY = "utility"
 
 
 class ModelConfig(BaseModel):
@@ -146,6 +148,9 @@ class LLMClient:
         self._current_model: str | None = None
         self._tokenizer = tiktoken.get_encoding("cl100k_base")  # Approximation
         
+        # CRITICAL: Track if we should unload models between calls (for 16GB systems)
+        self._unload_after_completion = True
+        
         # HTTP client with connection pooling
         self._client = httpx.Client(
             base_url=self._base_url,
@@ -204,6 +209,7 @@ class LLMClient:
         Load a model into memory (hot-swap).
         
         This ensures only one model is resident at a time.
+        CRITICAL: Unloads the current model first to free RAM.
         
         Args:
             model_name: Name of the model to load
@@ -225,10 +231,14 @@ class LLMClient:
                 f"Model '{model_name}' not found. Available: {available_models}"
             )
         
-        # Unload current model by loading new one
-        # Ollama handles this automatically
+        # CRITICAL: Unload current model first to free RAM
+        if self._current_model and self._current_model != model_name:
+            self.unload_model(self._current_model)
+        
+        # Load the new model with a minimal warmup request
         try:
             # Warm up the model with a minimal request
+            # Use keep_alive to control how long model stays loaded
             response = self._client.post(
                 "/api/generate",
                 json={
@@ -236,6 +246,7 @@ class LLMClient:
                     "prompt": "Hello",
                     "stream": False,
                     "options": {"num_predict": 1},
+                    "keep_alive": "5m",  # Keep loaded for 5 minutes during active use
                 },
                 timeout=120.0,  # Model loading can take time
             )
@@ -248,6 +259,47 @@ class LLMClient:
             return True
         except httpx.RequestError as e:
             raise ConnectionError(f"Failed to load model: {e}") from e
+    
+    def unload_model(self, model_name: str | None = None) -> bool:
+        """
+        Unload a model from memory to free RAM.
+        
+        CRITICAL for 16GB systems: Call this after each completion
+        to prevent OOM errors.
+        
+        Args:
+            model_name: Name of model to unload (default: current model)
+            
+        Returns:
+            True if model was unloaded
+        """
+        model_to_unload = model_name or self._current_model
+        if not model_to_unload:
+            return False
+        
+        try:
+            # Setting keep_alive to 0 immediately unloads the model
+            response = self._client.post(
+                "/api/generate",
+                json={
+                    "model": model_to_unload,
+                    "prompt": "",
+                    "keep_alive": 0,  # Unload immediately
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            
+            if model_to_unload == self._current_model:
+                self._current_model = None
+            
+            if self._telemetry:
+                self._telemetry.record_event("model_unloaded", {"model": model_to_unload})
+            
+            return True
+        except httpx.RequestError:
+            # Non-critical - model may have already been unloaded
+            return False
     
     def count_tokens(self, text: str) -> int:
         """
@@ -359,6 +411,10 @@ class LLMClient:
                 completion_tokens=completion_tokens,
                 latency_ms=latency_ms,
             )
+        
+        # CRITICAL: Unload model after completion to free RAM on 16GB systems
+        if self._unload_after_completion:
+            self.unload_model(config.name)
         
         return result
     

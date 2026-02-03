@@ -42,6 +42,18 @@ from src.core.telemetry import (
     TelemetryCollector,
     TelemetryEvent,
 )
+from src.core.contracts import (
+    ContractEnforcer,
+    ContractViolation,
+    ValidationResult,
+    ViolationType,
+)
+from src.core.file_lock import (
+    AtomicFileWriter,
+    FileLockError,
+    FileLockManager,
+    FileLockTimeout,
+)
 
 __all__ = [
     # Context Manager
@@ -77,4 +89,14 @@ __all__ = [
     "EventType",
     "TelemetryCollector",
     "TelemetryEvent",
+    # Contracts
+    "ContractEnforcer",
+    "ContractViolation",
+    "ValidationResult",
+    "ViolationType",
+    # File Locks
+    "AtomicFileWriter",
+    "FileLockError",
+    "FileLockManager",
+    "FileLockTimeout",
 ]

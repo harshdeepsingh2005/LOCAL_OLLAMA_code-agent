@@ -64,6 +64,7 @@ You MUST respond with a valid JSON object in this exact format:
 ```json
 {
     "verdict": "APPROVE|REQUEST_CHANGES|REJECT",
+    "task_complete": true|false,
     "summary": "Overall assessment of the changes",
     "issues": [
         {
@@ -82,10 +83,21 @@ You MUST respond with a valid JSON object in this exact format:
 }
 ```
 
+## CRITICAL: task_complete Field
+- Set task_complete=true ONLY when ALL acceptance criteria are met
+- When task_complete=true, the system will STOP and not make any more changes
+- When task_complete=false, the system will continue trying to fix issues
+
 ## Review Guidelines:
-- APPROVE: Code meets all acceptance criteria with no critical/major issues
-- REQUEST_CHANGES: Issues that must be fixed before approval
-- REJECT: Fundamental problems that require complete rework
+- APPROVE + task_complete=true: Code meets ALL acceptance criteria. STOPS the run.
+- REQUEST_CHANGES + task_complete=false: Fixable issues exist, fixer will address them.
+- REJECT + task_complete=false: Fundamental problems requiring complete rework. ABORTS the run.
+
+## IMPORTANT: When to set task_complete=true
+- ALL acceptance criteria are satisfied
+- No critical or major issues remain
+- The code is ready for production
+- Even if there are minor suggestions, if criteria are met, set task_complete=true
 
 ## Severity Levels:
 - critical: Security issues, data loss risk, crashes
@@ -210,6 +222,11 @@ You MUST respond with a valid JSON object in this exact format:
             except ValueError:
                 verdict = ReviewVerdict.REQUEST_CHANGES
             
+            # Parse task_complete - EXPLICIT TERMINAL STATE
+            # If verdict is APPROVE, default task_complete to True for backward compatibility
+            # This ensures approval always terminates the loop
+            task_complete = data.get("task_complete", verdict == ReviewVerdict.APPROVE)
+            
             # Parse issues
             issues: list[ReviewIssue] = []
             for issue_data in data.get("issues", []):
@@ -222,10 +239,16 @@ You MUST respond with a valid JSON object in this exact format:
                 )
                 issues.append(issue)
             
+            # SAFETY: If verdict is APPROVE, force task_complete=True
+            # This prevents any scenario where APPROVE doesn't terminate
+            if verdict == ReviewVerdict.APPROVE:
+                task_complete = True
+            
             return ReviewerOutput(
                 task_id=input_data.task_id,
                 status=AgentStatus.SUCCESS,
                 verdict=verdict,
+                task_complete=task_complete,
                 issues=issues,
                 summary=data.get("summary", ""),
                 strengths=data.get("strengths", []),

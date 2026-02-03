@@ -33,6 +33,7 @@ class LoopState(str, Enum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     ABORTED = "aborted"
+    PAUSED = "paused"  # New: paused waiting for user input
 
 
 class TerminationReason(str, Enum):
@@ -45,6 +46,7 @@ class TerminationReason(str, Enum):
     USER_ABORT = "user_abort"
     ALL_TASKS_COMPLETE = "all_tasks_complete"
     UNRECOVERABLE_FAILURE = "unrecoverable_failure"
+    PAUSED_FOR_USER = "paused_for_user"  # New: paused waiting for user decision
 
 
 @dataclass
@@ -148,6 +150,9 @@ class LoopController:
         self._termination_reason: TerminationReason | None = None
         self._termination_message: str | None = None
         
+        # User continuation flag (for max iterations)
+        self._needs_user_continue: bool = False
+        
         # Callbacks
         self._on_state_change: Callable[[LoopState, LoopState], None] | None = None
     
@@ -168,7 +173,7 @@ class LoopController:
         self,
         agent_type: str,
         task_id: str | None = None,
-    ) -> LoopIteration:
+    ) -> LoopIteration | None:
         """
         Begin a new loop iteration.
         
@@ -177,13 +182,12 @@ class LoopController:
             task_id: Optional task ID
             
         Returns:
-            LoopIteration record
+            LoopIteration record, or None if limit reached (check needs_user_continue)
             
         Raises:
-            LoopLimitExceededError: If limits exceeded
             LoopTimeoutError: If timeout exceeded
         """
-        # Check timeout
+        # Check timeout (this is still a hard error)
         if self._start_time:
             elapsed = time.perf_counter() - self._start_time
             if elapsed > self._max_run_seconds:
@@ -193,15 +197,11 @@ class LoopController:
                 )
                 raise LoopTimeoutError(f"Run timeout exceeded: {elapsed:.1f}s")
         
-        # Check iteration limit
+        # Check iteration limit - don't raise, signal for user input
         if self._iteration_count >= self._max_iterations:
-            self._terminate(
-                TerminationReason.MAX_ITERATIONS,
-                f"Max iterations ({self._max_iterations}) exceeded"
-            )
-            raise LoopLimitExceededError(
-                f"Maximum iterations exceeded: {self._iteration_count}"
-            )
+            self._needs_user_continue = True
+            self._transition_to(LoopState.PAUSED)
+            return None
         
         # Determine state based on agent type
         state_map = {
@@ -283,6 +283,30 @@ class LoopController:
         """Reset the fix iteration counter (e.g., when moving to new task)."""
         self._fix_iteration_count = 0
     
+    @property
+    def needs_user_continue(self) -> bool:
+        """Check if max iterations reached and waiting for user decision."""
+        return self._needs_user_continue
+    
+    def extend_iterations(self, additional: int = 10) -> None:
+        """
+        Extend the maximum iterations (called when user chooses to continue).
+        
+        Args:
+            additional: Number of additional iterations to allow
+        """
+        self._max_iterations += additional
+        self._needs_user_continue = False
+        self._transition_to(LoopState.EXECUTING)  # Resume execution
+    
+    def decline_continue(self) -> None:
+        """User declined to continue - terminate gracefully."""
+        self._needs_user_continue = False
+        self._terminate(
+            TerminationReason.MAX_ITERATIONS,
+            f"Max iterations ({self._iteration_count}) reached - user declined to continue"
+        )
+    
     def _terminate(self, reason: TerminationReason, message: str) -> None:
         """Set termination reason and state."""
         self._termination_reason = reason
@@ -294,6 +318,8 @@ class LoopController:
             self._transition_to(LoopState.TIMEOUT)
         elif reason == TerminationReason.USER_ABORT:
             self._transition_to(LoopState.ABORTED)
+        elif reason == TerminationReason.PAUSED_FOR_USER:
+            self._transition_to(LoopState.PAUSED)
         else:
             self._transition_to(LoopState.FAILED)
     
@@ -316,18 +342,24 @@ class LoopController:
     
     @property
     def is_running(self) -> bool:
-        """Check if loop is still running."""
+        """Check if loop is still running (not paused or terminated)."""
         return self._state not in (
             LoopState.IDLE,
             LoopState.COMPLETED,
             LoopState.FAILED,
             LoopState.TIMEOUT,
             LoopState.ABORTED,
+            LoopState.PAUSED,
         )
     
     @property
+    def is_paused(self) -> bool:
+        """Check if loop is paused waiting for user input."""
+        return self._state == LoopState.PAUSED
+    
+    @property
     def is_terminal(self) -> bool:
-        """Check if loop is in terminal state."""
+        """Check if loop is in terminal state (not paused)."""
         return self._state in (
             LoopState.COMPLETED,
             LoopState.FAILED,

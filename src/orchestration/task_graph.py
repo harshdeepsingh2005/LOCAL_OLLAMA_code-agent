@@ -179,10 +179,20 @@ class TaskGraph:
         )
         self._nodes[subtask.id] = node
         
-        # Update dependents of dependencies
+        # Update dependents of dependencies that already exist
         for dep_id in subtask.dependencies:
             if dep_id in self._nodes:
                 self._nodes[dep_id].dependents.append(subtask.id)
+        
+        # Update dependents for any tasks that depend on this node
+        # (they may have been added before this node)
+        for existing_node in self._nodes.values():
+            if subtask.id in existing_node.dependencies:
+                if subtask.id not in existing_node.subtask.dependencies:
+                    # This shouldn't happen but add for safety
+                    pass
+                if existing_node.id not in node.dependents:
+                    node.dependents.append(existing_node.id)
         
         # Invalidate cached execution order
         self._execution_order = None
@@ -257,6 +267,53 @@ class TaskGraph:
         
         return False
     
+    def _find_cycle_nodes(self, unprocessed: list[str]) -> str:
+        """
+        Find nodes involved in a cycle for error reporting.
+        
+        Args:
+            unprocessed: List of node IDs that weren't processed
+            
+        Returns:
+            String describing the cycle
+        """
+        if not unprocessed:
+            return "unknown"
+        
+        # Try to find the actual cycle
+        for start in unprocessed:
+            visited = set()
+            path = []
+            
+            def find_cycle(node_id: str) -> list[str] | None:
+                if node_id in path:
+                    cycle_start = path.index(node_id)
+                    return path[cycle_start:] + [node_id]
+                if node_id in visited or node_id not in self._nodes:
+                    return None
+                
+                visited.add(node_id)
+                path.append(node_id)
+                
+                node = self._nodes[node_id]
+                for dep_id in node.dependencies:
+                    if dep_id in self._nodes:
+                        result = find_cycle(dep_id)
+                        if result:
+                            return result
+                
+                path.pop()
+                return None
+            
+            cycle = find_cycle(start)
+            if cycle:
+                return " -> ".join(cycle)
+        
+        # Fallback: just list unprocessed nodes
+        return ", ".join(unprocessed[:5]) + (
+            f" (and {len(unprocessed) - 5} more)" if len(unprocessed) > 5 else ""
+        )
+    
     def topological_sort(self) -> list[str]:
         """
         Get tasks in topological order (respecting dependencies).
@@ -274,10 +331,13 @@ class TaskGraph:
             raise CycleDetectedError("Task graph contains cycles")
         
         # Kahn's algorithm for topological sort
-        in_degree = {node_id: len(node.dependencies) 
-                    for node_id, node in self._nodes.items()}
+        # Only count dependencies that actually exist in the graph
+        in_degree = {
+            node_id: sum(1 for dep in node.dependencies if dep in self._nodes)
+            for node_id, node in self._nodes.items()
+        }
         
-        # Start with nodes that have no dependencies
+        # Start with nodes that have no (existing) dependencies
         queue = [node_id for node_id, degree in in_degree.items() if degree == 0]
         result = []
         
@@ -296,7 +356,12 @@ class TaskGraph:
         
         # Check if all nodes were processed
         if len(result) != len(self._nodes):
-            raise CycleDetectedError("Could not process all nodes - cycle likely exists")
+            # Identify problematic nodes for better error message
+            unprocessed = [nid for nid in self._nodes if nid not in result]
+            cycle_info = self._find_cycle_nodes(unprocessed)
+            raise CycleDetectedError(
+                f"Could not process all nodes - cycle detected involving: {cycle_info}"
+            )
         
         self._execution_order = result
         return result

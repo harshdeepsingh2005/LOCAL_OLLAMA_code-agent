@@ -26,6 +26,13 @@ from src.orchestration.task_graph import (
     TaskNode,
     TaskStatus,
 )
+from src.orchestration.large_project import (
+    LargeProjectHandler,
+    ProjectMetrics,
+    ShardConfig,
+    ShardSummary,
+    TaskShard,
+)
 
 __all__ = [
     # Executor
@@ -46,4 +53,10 @@ __all__ = [
     "RollbackManager",
     "Checkpoint",
     "FileSnapshot",
+    # Large Project
+    "LargeProjectHandler",
+    "ProjectMetrics",
+    "ShardConfig",
+    "ShardSummary",
+    "TaskShard",
 ]

@@ -248,6 +248,14 @@ class ReviewerOutput(AgentOutput):
     # Verdict
     verdict: ReviewVerdict = ReviewVerdict.REQUEST_CHANGES
     
+    # EXPLICIT TERMINAL STATE: True means task is complete, stop all loops
+    # This is the authoritative signal that no more coder/fixer runs are needed
+    task_complete: bool = Field(
+        default=False,
+        description="TERMINAL STATE: True if task fully meets acceptance criteria. "
+                    "When True, the orchestrator MUST stop and NOT invoke coder/fixer again."
+    )
+    
     # Issues found
     issues: list[ReviewIssue] = Field(default_factory=list)
     

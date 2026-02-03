@@ -87,6 +87,9 @@ class ExecutionResult:
     termination_reason: str = ""
     error: str | None = None
     
+    # Continuation flag: True if max iterations reached and user can continue
+    needs_continuation: bool = True
+    
     # Timestamps
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
@@ -280,6 +283,11 @@ class Executor:
             
             # Phase 1: Planning
             plan = self._execute_planning(task_description)
+            if plan is None:
+                # Iteration limit reached during planning
+                result.needs_continuation = True
+                result.error = "Max iterations reached during planning"
+                return result
             if plan.status != AgentStatus.SUCCESS or not plan.subtasks:
                 self._loop.complete_failure(
                     TerminationReason.FATAL_ERROR,
@@ -298,12 +306,22 @@ class Executor:
             # Phase 2: Execute tasks
             for task_node in self._task_graph.iter_execution_order():
                 if not self._loop.is_running:
+                    # Check if we're paused for user continuation
+                    if self._loop.is_paused:
+                        result.needs_continuation = True
+                        result.error = f"Max iterations ({self._loop.iteration_count}) reached"
+                        return result
                     break
                 
                 # Execute single task through code-review-fix cycle
                 task_success = self._execute_task(task_node)
                 
-                if task_success:
+                if task_success is None:
+                    # Iteration limit reached - needs user continuation
+                    result.needs_continuation = True
+                    result.error = f"Max iterations ({self._loop.iteration_count}) reached"
+                    return result
+                elif task_success:
                     result.subtasks_completed += 1
                 else:
                     result.subtasks_failed += 1
@@ -358,14 +376,234 @@ class Executor:
                 summary=f"Completed {result.subtasks_completed}/{result.subtasks_total} tasks"
             )
             
-            # Cleanup
-            if self._llm_client:
+            # Cleanup - DON'T close LLM client if we might continue
+            if self._llm_client and not result.needs_continuation:
                 self._llm_client.close()
         
         return result
     
-    def _execute_planning(self, task_description: str) -> PlannerOutput:
-        """Execute the planning phase."""
+    def continue_execution(self, additional_iterations: int = 10) -> ExecutionResult:
+        """
+        Continue execution after hitting max iterations.
+        
+        This method resumes from where the executor paused, WITHOUT
+        restarting planning or re-running completed tasks.
+        
+        Args:
+            additional_iterations: Number of additional iterations to allow
+            
+        Returns:
+            ExecutionResult with updated status
+        """
+        assert self._loop is not None, "Cannot continue - executor not initialized"
+        assert self._task_graph is not None, "Cannot continue - no task graph"
+        assert self._telemetry is not None
+        assert self._run_id is not None
+        
+        # Extend iteration limit
+        self._loop.extend_iterations(additional_iterations)
+        
+        # Re-initialize LLM client if it was closed
+        if self._llm_client is None:
+            self._llm_client = LLMClient(
+                base_url=self._config.models.ollama.base_url,
+                timeout=float(self._config.models.ollama.timeout_seconds),
+            )
+        
+        # Create result tracking continuation progress
+        result = ExecutionResult(
+            run_id=self._run_id,
+            success=False,
+            task_description="(continued)",
+            subtasks_total=len(self._task_graph),
+        )
+        
+        # Count already completed tasks
+        stats = self._task_graph.get_stats()
+        result.subtasks_completed = stats.completed
+        result.subtasks_failed = stats.failed
+        
+        try:
+            # Resume execution from pending/running tasks
+            for task_node in self._task_graph.iter_execution_order():
+                # Skip already completed or failed tasks
+                if task_node.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, 
+                                        TaskStatus.SKIPPED, TaskStatus.BLOCKED):
+                    continue
+                
+                if not self._loop.is_running:
+                    if self._loop.is_paused:
+                        result.needs_continuation = True
+                        result.error = f"Max iterations ({self._loop.iteration_count}) reached"
+                        return result
+                    break
+                
+                # Execute the task (resume if it was running)
+                task_success = self._execute_task(task_node)
+                
+                if task_success is None:
+                    result.needs_continuation = True
+                    result.error = f"Max iterations ({self._loop.iteration_count}) reached"
+                    return result
+                elif task_success:
+                    result.subtasks_completed += 1
+                else:
+                    result.subtasks_failed += 1
+                    self._task_graph.propagate_failure(task_node.id)
+                
+                self._loop.reset_fix_counter()
+            
+            # Check final status
+            stats = self._task_graph.get_stats()
+            if stats.failed + stats.blocked == 0 and stats.completed == stats.total_tasks:
+                self._loop.complete_success()
+                result.success = True
+            elif stats.pending == 0 and stats.running == 0:
+                # All tasks processed but some failed
+                self._loop.complete_failure(
+                    TerminationReason.UNRECOVERABLE_FAILURE,
+                    f"{stats.failed} tasks failed, {stats.blocked} blocked"
+                )
+            # else: still have pending tasks, might need more iterations
+            
+        except Exception as e:
+            self._loop.complete_failure(TerminationReason.FATAL_ERROR, str(e))
+            result.error = str(e)
+            self._telemetry.record_error(str(e))
+        
+        finally:
+            result.completed_at = datetime.now(timezone.utc)
+            result.total_duration_ms = (
+                result.completed_at - result.started_at
+            ).total_seconds() * 1000
+            result.iterations = self._loop.iteration_count
+            result.total_tokens = self._telemetry.run_metrics.tokens.total
+            result.termination_reason = (
+                self._loop.termination_reason.value
+                if self._loop.termination_reason else "in_progress"
+            )
+            
+            if self._file_guard:
+                result.files_created = [str(f) for f in self._file_guard.state.files_created]
+                result.files_modified = [str(f) for f in self._file_guard.state.files_modified]
+            
+            # Only close LLM if we're done
+            if self._llm_client and not result.needs_continuation:
+                self._llm_client.close()
+        
+        return result
+    
+    def execute_additional_task(self, task_description: str) -> ExecutionResult:
+        """
+        Execute an additional task in the same project session.
+        
+        This method allows adding new tasks to an ongoing project WITHOUT
+        reinitializing the executor. All previous context, checkpoints, and
+        state are preserved.
+        
+        Use this for iterative project development where multiple tasks
+        are executed sequentially in the same session.
+        
+        Args:
+            task_description: New task to execute
+            
+        Returns:
+            ExecutionResult for this specific task
+            
+        Raises:
+            ExecutionError: If executor not initialized
+        """
+        if not self._run_id or not self._loop or not self._telemetry:
+            raise ExecutionError("Cannot execute additional task - executor not initialized")
+        
+        # Reset the loop for new task if it was in terminal state
+        if self._loop.is_terminal:
+            self._loop._state = LoopState.PLANNING
+            self._loop._termination_reason = None
+            self._loop._termination_message = None
+            self._loop._needs_user_continue = False
+        
+        # Re-initialize LLM client if needed
+        if self._llm_client is None:
+            self._llm_client = LLMClient(
+                base_url=self._config.models.ollama.base_url,
+                timeout=float(self._config.models.ollama.timeout_seconds),
+            )
+        
+        result = ExecutionResult(
+            run_id=self._run_id,
+            success=False,
+            task_description=task_description,
+        )
+        
+        try:
+            # Phase 1: Planning for the new task
+            plan = self._execute_planning(task_description)
+            if plan is None:
+                result.needs_continuation = True
+                result.error = "Max iterations reached during planning"
+                return result
+            if plan.status != AgentStatus.SUCCESS or not plan.subtasks:
+                result.error = plan.error or "No subtasks generated"
+                return result
+            
+            # Create or extend task graph
+            new_task_graph = TaskGraph.from_subtasks(plan.subtasks)
+            result.subtasks_total = len(plan.subtasks)
+            
+            # Checkpoint before new task execution
+            self._checkpoint(f"Starting additional task: {task_description}", None)
+            
+            # Phase 2: Execute new tasks
+            for task_node in new_task_graph.iter_execution_order():
+                if not self._loop.is_running:
+                    if self._loop.is_paused:
+                        result.needs_continuation = True
+                        result.error = f"Max iterations ({self._loop.iteration_count}) reached"
+                        return result
+                    break
+                
+                task_success = self._execute_task(task_node)
+                
+                if task_success is None:
+                    result.needs_continuation = True
+                    result.error = f"Max iterations ({self._loop.iteration_count}) reached"
+                    return result
+                elif task_success:
+                    result.subtasks_completed += 1
+                else:
+                    result.subtasks_failed += 1
+                    new_task_graph.propagate_failure(task_node.id)
+                
+                self._loop.reset_fix_counter()
+            
+            # Check completion
+            stats = new_task_graph.get_stats()
+            if stats.failed + stats.blocked == 0:
+                result.success = True
+            
+        except Exception as e:
+            result.error = str(e)
+            self._telemetry.record_error(str(e))
+        
+        finally:
+            result.completed_at = datetime.now(timezone.utc)
+            result.total_duration_ms = (
+                result.completed_at - result.started_at
+            ).total_seconds() * 1000
+            result.iterations = self._loop.iteration_count
+            result.total_tokens = self._telemetry.run_metrics.tokens.total
+            
+            if self._file_guard:
+                result.files_created = [str(f) for f in self._file_guard.state.files_created]
+                result.files_modified = [str(f) for f in self._file_guard.state.files_modified]
+            
+            # Don't close LLM - keep session alive for next task
+        
+        return result
+    
+    def _execute_planning(self, task_description: str) -> PlannerOutput | None:
+        """Execute the planning phase. Returns None if iteration limit reached."""
         assert self._loop is not None
         
         # Get workspace context
@@ -381,6 +619,9 @@ class Executor:
         
         # Execute planner
         iteration = self._loop.begin_iteration("planner")
+        if iteration is None:
+            return None
+        
         context = self._create_agent_context(AgentType.PLANNER)
         
         output = self._planner.execute(planner_input, context)
@@ -394,12 +635,14 @@ class Executor:
         
         return output
     
-    def _execute_task(self, task_node: TaskNode) -> bool:
+    def _execute_task(self, task_node: TaskNode) -> bool | None:
         """
         Execute a single task through the code-review-fix cycle.
         
         Returns:
             True if task completed successfully
+            False if task failed
+            None if iteration limit reached (needs user continuation)
         """
         assert self._loop is not None
         
@@ -411,6 +654,9 @@ class Executor:
         
         # Code phase
         coder_output = self._execute_coder(task_node.subtask, file_contents)
+        if coder_output is None:
+            # Iteration limit reached
+            return None
         if coder_output.status != AgentStatus.SUCCESS:
             task_node.mark_failed(coder_output.error or "Coding failed")
             return False
@@ -426,43 +672,80 @@ class Executor:
                 coder_output.implementation_notes,
             )
             
+            if reviewer_output is None:
+                # Iteration limit reached
+                return None
+            
             if reviewer_output.status != AgentStatus.SUCCESS:
                 task_node.mark_failed(reviewer_output.error or "Review failed")
                 return False
             
-            # Check verdict
-            if reviewer_output.verdict == ReviewVerdict.APPROVE:
-                # Apply changes
+            # ============================================================
+            # TERMINAL STATE CHECK: This is the authoritative stop condition
+            # ============================================================
+            # 
+            # The reviewer's task_complete field is the EXPLICIT terminal signal.
+            # When task_complete=True, the task is DONE - no more iterations.
+            #
+            # This check MUST come first, before any other verdict handling,
+            # to ensure we never accidentally continue after approval.
+            # ============================================================
+            
+            if reviewer_output.task_complete:
+                # TERMINAL: Task is complete. Apply changes and EXIT the loop.
+                # This is the normal successful completion path.
                 success = self._apply_changes(current_changes)
                 if success:
-                    task_node.mark_completed({"changes": len(current_changes)})
+                    task_node.mark_completed({
+                        "changes": len(current_changes),
+                        "verdict": reviewer_output.verdict.value,
+                    })
+                    # Return True to signal successful completion
+                    # The outer loop will move to the next task
                     return True
                 else:
-                    task_node.mark_failed("Failed to apply changes")
+                    task_node.mark_failed("Failed to apply approved changes")
                     return False
             
-            elif reviewer_output.verdict == ReviewVerdict.REJECT:
-                task_node.mark_failed("Changes rejected by reviewer")
+            # ============================================================
+            # NON-TERMINAL STATES: Only reached if task_complete=False
+            # ============================================================
+            
+            if reviewer_output.verdict == ReviewVerdict.REJECT:
+                # ABORT: Fundamental problems, cannot continue
+                task_node.mark_failed(
+                    f"Changes rejected by reviewer: {reviewer_output.summary}"
+                )
                 return False
             
-            else:  # REQUEST_CHANGES
-                if not self._loop.can_fix_again():
-                    task_node.mark_failed("Max fix iterations exceeded")
-                    return False
-                
-                # Fix phase
-                fixer_output = self._execute_fixer(
-                    current_changes,
-                    reviewer_output.issues,
-                    file_contents,
-                )
-                
-                if fixer_output.status != AgentStatus.SUCCESS:
-                    task_node.mark_failed(fixer_output.error or "Fix failed")
-                    return False
-                
-                # Use fixed changes for next review
-                current_changes = fixer_output.fixed_changes
+            # REQUEST_CHANGES: Invoke fixer to address issues
+            # This is the ONLY path that continues the loop
+            if not self._loop.can_fix_again():
+                task_node.mark_failed("Max fix iterations exceeded")
+                return False
+            
+            # Fix phase - address reviewer's issues
+            fixer_output = self._execute_fixer(
+                current_changes,
+                reviewer_output.issues,
+                file_contents,
+            )
+            
+            if fixer_output is None:
+                # Iteration limit reached
+                return None
+            
+            if fixer_output.status != AgentStatus.SUCCESS:
+                task_node.mark_failed(fixer_output.error or "Fix failed")
+                return False
+            
+            # Use fixed changes for next review iteration
+            current_changes = fixer_output.fixed_changes
+            # Loop continues to review the fixed changes
+        
+        # Check if we're paused for user continuation
+        if self._loop.is_paused:
+            return None
         
         task_node.mark_failed("Execution interrupted")
         return False
@@ -471,8 +754,8 @@ class Executor:
         self,
         subtask: Subtask,
         file_contents: dict[str, str],
-    ) -> CoderOutput:
-        """Execute the coder agent."""
+    ) -> CoderOutput | None:
+        """Execute the coder agent. Returns None if iteration limit reached."""
         assert self._loop is not None
         
         coder_input = CoderInput(
@@ -483,6 +766,10 @@ class Executor:
         )
         
         iteration = self._loop.begin_iteration("coder", subtask.id)
+        if iteration is None:
+            # Max iterations reached - needs user continuation
+            return None
+        
         context = self._create_agent_context(AgentType.CODER)
         
         output = self._coder.execute(coder_input, context)
@@ -501,8 +788,8 @@ class Executor:
         subtask: Subtask,
         changes: list[CodeChange],
         implementation_notes: str,
-    ) -> ReviewerOutput:
-        """Execute the reviewer agent."""
+    ) -> ReviewerOutput | None:
+        """Execute the reviewer agent. Returns None if iteration limit reached."""
         assert self._loop is not None
         
         # Get original file contents
@@ -521,6 +808,9 @@ class Executor:
         )
         
         iteration = self._loop.begin_iteration("reviewer", subtask.id)
+        if iteration is None:
+            return None
+        
         context = self._create_agent_context(AgentType.REVIEWER)
         
         output = self._reviewer.execute(reviewer_input, context)
@@ -539,8 +829,8 @@ class Executor:
         changes: list[CodeChange],
         issues: list,
         file_contents: dict[str, str],
-    ) -> FixerOutput:
-        """Execute the fixer agent."""
+    ) -> FixerOutput | None:
+        """Execute the fixer agent. Returns None if iteration limit reached."""
         assert self._loop is not None
         
         fixer_input = FixerInput(
@@ -552,6 +842,9 @@ class Executor:
         )
         
         iteration = self._loop.begin_iteration("fixer")
+        if iteration is None:
+            return None
+        
         context = self._create_agent_context(AgentType.FIXER)
         
         output = self._fixer.execute(fixer_input, context)

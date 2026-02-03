@@ -1,41 +1,201 @@
-# Local Coding Agents
+# Local Coding Agent
 
-**Production-grade, extensible, auditable local AI coding agent system**
+**Your AI pair programmer that runs entirely on your machine**
 
-Designed for Apple Silicon (M-series, 16GB RAM) • Fully offline • Deterministic behavior
+[![CI](https://github.com/local-coding-agents/local-coding-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/local-coding-agents/local-coding-agents/actions/workflows/ci.yml)
+
+Designed for Apple Silicon (M-series, 16GB RAM) • Fully offline • Human-in-the-loop
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
+# 1. Install
 pip install -e .
 
 # 2. Ensure Ollama is running with a model
 ollama pull qwen2.5-coder:7b-instruct-q4_K_M
 ollama serve
 
-# 3. Run a task
-lca run "Create a Python function that calculates fibonacci numbers"
+# 3. Start interactive session
+agent
 
-# 4. Check status
-lca status
+# 4. Or run a one-shot task
+agent -t "Add error handling to the parse function in utils.py"
 ```
 
 ---
 
 ## Overview
 
-Local Coding Agents (LCA) is a commercial-grade coding assistant that runs entirely on your local machine using Ollama for LLM inference. It implements a strict separation of concerns between agents, tools, orchestration, and state management.
+Local Coding Agent is a **Claude Code-like CLI** that runs entirely on your machine using Ollama. It's designed for developers who want AI assistance without sending code to the cloud.
+
+### Why This?
+
+- **🔒 Private**: Your code never leaves your machine
+- **⚡ Fast**: No network latency, runs on Apple Silicon GPU
+- **🎯 Safe**: Human approval before any file changes
+- **↩️ Reversible**: Full rollback support for every change
+- **📊 Transparent**: See exactly what the AI is doing
 
 ### Key Features
 
-- **Fully Offline**: No cloud APIs, no telemetry exfiltration
-- **Apple Silicon Optimized**: Designed for 7B-8B quantized models (Q4/Q5)
-- **Deterministic Execution**: Reproducible runs with checkpointing
-- **Safe by Design**: All file operations mediated, diff-based edits, rollback support
-- **Observable**: Structured logging, decision records, token tracking
+| Feature | Description |
+|---------|-------------|
+| **Interactive CLI** | Chat with your codebase like Claude Code |
+| **Human-in-the-Loop** | Review and approve all changes before they're applied |
+| **Diff Preview** | See exactly what will change before accepting |
+| **Rollback** | Undo any change with `/rollback` |
+| **Session Memory** | Continue where you left off |
+| **Large Project Support** | Handles codebases larger than context window |
+| **Policy Guards** | Configurable safety limits and file protections |
+
+---
+
+## Installation
+
+### Prerequisites
+
+- macOS with Apple Silicon (M1/M2/M3/M4)
+- 16GB RAM minimum (8GB may work with smaller models)
+- Python 3.10+
+- [Ollama](https://ollama.ai) installed
+
+### Install
+
+```bash
+# Clone the repository
+git clone https://github.com/local-coding-agents/local-coding-agents.git
+cd local-coding-agents
+
+# Create virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install the package
+pip install -e .
+
+# Verify installation
+agent doctor
+```
+
+### Pull a Model
+
+```bash
+# Recommended: Qwen 2.5 Coder (best balance of quality/speed)
+ollama pull qwen2.5-coder:7b-instruct-q4_K_M
+
+# Alternative: DeepSeek Coder
+ollama pull deepseek-coder:6.7b-instruct-q4_K_M
+
+# Alternative: CodeLlama
+ollama pull codellama:7b-instruct-q4_K_M
+```
+
+---
+
+## Usage
+
+### Interactive Mode (Recommended)
+
+```bash
+# Start a session in current directory
+agent
+
+# Start in a specific project
+agent --workspace ~/projects/my-app
+
+# Resume previous session
+agent --resume
+```
+
+Once in a session:
+
+```
+You: Add input validation to the signup form
+
+◐ Planning...
+◐ Writing code...
+
+┌─ Pending Changes ──────────────────────────────────┐
+│ src/forms/signup.py                                │
+│ @@ -15,6 +15,12 @@                                 │
+│  def validate(self):                               │
+│ +    if not self.email or '@' not in self.email:  │
+│ +        raise ValueError("Invalid email")         │
+│ +    if len(self.password) < 8:                   │
+│ +        raise ValueError("Password too short")   │
+└────────────────────────────────────────────────────┘
+
+Apply changes? [y/n/e(dit)]:
+```
+
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/diff` | Show pending changes |
+| `/apply` | Apply pending changes |
+| `/reject` | Reject pending changes |
+| `/undo` | Undo last applied change |
+| `/rollback [id]` | Rollback to checkpoint |
+| `/checkpoints` | List available checkpoints |
+| `/project [on\|off]` | Enable/disable project mode for iterative development |
+| `/plan` | Show current plan |
+| `/tokens` | Show token usage |
+| `/model [name]` | Switch model |
+| `/clear` | Clear conversation |
+| `/exit` | Exit session |
+
+### Project Mode
+
+For continuous iterative development on the same project:
+
+```bash
+agent
+
+> /project on
+[Project Mode] Enabled - executor will persist across tasks
+
+🔄 [Project] > Create a web scraper for news articles
+🔄 [Project] > Add caching to avoid duplicate requests
+🔄 [Project] > Add unit tests for the scraper
+
+> /project off
+```
+
+See [docs/project-mode.md](docs/project-mode.md) for details.
+
+### One-Shot Mode
+
+```bash
+# Quick task (still requires approval)
+agent -t "Fix the TypeError in api/routes.py"
+
+# Auto-approve (use carefully!)
+agent --auto-approve -t "Format all Python files with black"
+
+# Specify model
+agent --model codellama:7b -t "Explain the auth flow"
+```
+
+### Other Commands
+
+```bash
+# Check system status
+agent doctor
+
+# Show version
+agent version
+
+# List previous sessions
+agent sessions
+
+# Show/edit configuration
+agent config
+```
 
 ---
 
@@ -43,11 +203,23 @@ Local Coding Agents (LCA) is a commercial-grade coding assistant that runs entir
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
+│                           CLI                                    │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
+│  │  Session    │  │  Commands   │  │  Display    │              │
+│  └─────────────┘  └─────────────┘  └─────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
 │                        ORCHESTRATION                             │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
-│  │ Task Graph  │─▶│  Executor   │─▶│   Loop      │              │
+│  │ Task Graph  │  │  Executor   │  │   Loop      │              │
 │  │             │  │             │  │ Controller  │              │
 │  └─────────────┘  └─────────────┘  └─────────────┘              │
+│  ┌─────────────┐  ┌─────────────┐                               │
+│  │  Rollback   │  │Large Project│                               │
+│  │  Manager    │  │  Handler    │                               │
+│  └─────────────┘  └─────────────┘                               │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -55,7 +227,6 @@ Local Coding Agents (LCA) is a commercial-grade coding assistant that runs entir
 │                          AGENTS                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
 │  │ Planner  │  │  Coder   │  │ Reviewer │  │  Fixer   │        │
-│  │          │  │          │  │          │  │          │        │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘        │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -65,112 +236,42 @@ Local Coding Agents (LCA) is a commercial-grade coding assistant that runs entir
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
 │  │ LLM Client │  │ File Guard │  │Diff Engine │                 │
 │  └────────────┘  └────────────┘  └────────────┘                 │
-│  ┌────────────┐  ┌────────────┐                                 │
-│  │  Context   │  │ Telemetry  │                                 │
-│  │  Manager   │  │            │                                 │
-│  └────────────┘  └────────────┘                                 │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                          TOOLS                                   │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
-│  │ Filesystem │  │  Testing   │  │   Shell    │                 │
-│  │  (guarded) │  │  (guarded) │  │  (guarded) │                 │
-│  └────────────┘  └────────────┘  └────────────┘                 │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                          STATE                                   │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
-│  │ Run State  │  │Checkpoints │  │ Summaries  │                 │
+│  │  Context   │  │ Contracts  │  │ File Lock  │                 │
+│  │  Manager   │  │ Enforcer   │  │  Manager   │                 │
 │  └────────────┘  └────────────┘  └────────────┘                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Requirements
+## Safety Guarantees
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
-- 16GB RAM minimum
-- Python 3.11+
-- Ollama installed and running
+| Guarantee | How It Works |
+|-----------|--------------|
+| **No surprise writes** | All changes require human approval (unless `--auto-approve`) |
+| **Workspace containment** | Agent cannot access files outside your project |
+| **Rollback always works** | Full file snapshots at every checkpoint |
+| **Token limits** | Hard caps prevent runaway costs |
+| **Iteration limits** | Maximum cycles prevent infinite loops |
+| **Contract enforcement** | Agent outputs validated against schemas |
 
-### Supported Models
+### Protected Files
 
-- `codellama:7b-instruct-q4_K_M`
-- `deepseek-coder:6.7b-instruct-q4_K_M`
-- `qwen2.5-coder:7b-instruct-q4_K_M`
-- `mistral:7b-instruct-q4_K_M`
+By default, these files/patterns are protected:
 
----
+- `.env`, `.env.*` - Secrets
+- `.git/` - Git internals
+- `*.pem`, `*.key` - Credentials
+- `node_modules/`, `venv/` - Dependencies
 
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/local-coding-agents/local-coding-agents.git
-cd local-coding-agents
-
-# Create virtual environment
-python3.11 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -e ".[dev]"
-
-# Ensure Ollama is running
-ollama serve
-
-# Pull a supported model
-ollama pull qwen2.5-coder:7b-instruct-q4_K_M
-```
-
----
-
-## Usage
-
-### Basic Usage
-
-```bash
-# Run the agent with a task
-lca run --task "Implement a binary search function in Python"
-
-# Run with specific workspace
-lca run --task "Add unit tests for utils.py" --workspace ./my-project
-
-# Resume from checkpoint
-lca resume --run-id abc123
-
-# Rollback a run
-lca rollback --run-id abc123 --checkpoint 3
-```
-
-### Configuration
-
-```bash
-# Show current configuration
-lca config show
-
-# Validate configuration
-lca config validate
-```
-
-### Observability
-
-```bash
-# View run logs
-lca logs --run-id abc123
-
-# Export run summary
-lca export --run-id abc123 --format json
-```
+Configure in `src/config/policies.yaml`.
 
 ---
 
 ## Agent Contracts
+
+Each agent has a strict contract defining what it can and cannot do:
 
 ### Planner
 - **Input**: Task description, workspace context
@@ -194,63 +295,118 @@ lca export --run-id abc123 --format json
 
 ---
 
-## Safety Guarantees
+## Configuration
 
-1. **File Access Mediation**: All file operations go through FileGuard
-2. **Diff Validation**: Changes validated before application
-3. **Rollback Support**: Full state recovery at any checkpoint
-4. **Token Limits**: Hard caps per agent and per run
-5. **Iteration Limits**: Maximum cycles to prevent infinite loops
-6. **No Self-Modification**: Core logic is immutable at runtime
+### Models Configuration (`src/config/models.yaml`)
+
+```yaml
+default_model: qwen2.5-coder:7b-instruct-q4_K_M
+
+models:
+  qwen2.5-coder:7b-instruct-q4_K_M:
+    context_window: 32768
+    max_output: 8192
+    temperature: 0.1
+```
+
+### Limits Configuration (`src/config/limits.yaml`)
+
+```yaml
+max_iterations: 10
+max_tokens_per_run: 100000
+max_files_per_task: 5
+max_lines_per_edit: 500
+```
+
+### Policies Configuration (`src/config/policies.yaml`)
+
+```yaml
+protected_paths:
+  - ".env*"
+  - ".git/"
+  - "*.pem"
+  
+allowed_operations:
+  - read
+  - write
+  - create
+  # - delete  # Uncomment to allow deletions
+```
 
 ---
 
-## Project Structure
+## Development
+
+### Running Tests
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Run all tests
+pytest tests/ -v
+
+# Run safety tests only (critical!)
+pytest tests/test_safety.py -v
+
+# Run with coverage
+pytest tests/ --cov=src --cov-report=html
+```
+
+### Project Structure
 
 ```
 local-coding-agents/
-├── README.md
-├── pyproject.toml
-├── docs/
-│   ├── architecture.md
-│   ├── agent-contracts.md
-│   └── failure-modes.md
 ├── src/
-│   ├── main.py
-│   ├── config/
-│   │   ├── models.yaml
-│   │   ├── limits.yaml
-│   │   └── policies.yaml
-│   ├── core/
-│   │   ├── llm_client.py
-│   │   ├── context_manager.py
-│   │   ├── file_guard.py
-│   │   ├── diff_engine.py
-│   │   └── telemetry.py
-│   ├── agents/
-│   │   ├── base.py
-│   │   ├── planner.py
-│   │   ├── coder.py
-│   │   ├── reviewer.py
-│   │   └── fixer.py
-│   ├── orchestration/
-│   │   ├── task_graph.py
-│   │   ├── executor.py
-│   │   ├── loop_controller.py
-│   │   └── rollback.py
-│   ├── tools/
-│   │   ├── filesystem.py
-│   │   ├── testing.py
-│   │   └── shell.py
-│   └── state/
-│       ├── run_state.py
-│       ├── checkpoints.py
-│       └── summaries.py
-├── workspace/
-│   ├── src/
-│   ├── tests/
-│   └── artifacts/
-└── logs/
+│   ├── cli/              # CLI interface (the product!)
+│   │   ├── app.py        # Entry point
+│   │   ├── session.py    # Session management
+│   │   ├── commands.py   # Slash commands
+│   │   └── display.py    # Rich terminal output
+│   ├── agents/           # AI agents
+│   ├── core/             # Core systems
+│   ├── orchestration/    # Execution coordination
+│   ├── state/            # State management
+│   └── tools/            # Filesystem, shell, testing
+├── tests/                # Test suite
+├── docs/                 # Documentation
+└── workspace/            # Default working directory
+```
+
+---
+
+## Troubleshooting
+
+### "Ollama not running"
+
+```bash
+ollama serve
+```
+
+### "Model not found"
+
+```bash
+ollama pull qwen2.5-coder:7b-instruct-q4_K_M
+```
+
+### "Out of memory"
+
+Try a smaller model:
+```bash
+ollama pull codellama:7b-instruct-q4_0
+```
+
+### "Command not found: agent"
+
+Reinstall the package:
+```bash
+pip install -e .
+```
+
+### Check system status
+
+```bash
+agent doctor
 ```
 
 ---
@@ -259,6 +415,7 @@ local-coding-agents/
 
 - [Architecture Guide](docs/architecture.md)
 - [Agent Contracts](docs/agent-contracts.md)
+- [CLI Design](docs/cli-design.md)
 - [Failure Modes](docs/failure-modes.md)
 
 ---
