@@ -1,0 +1,32 @@
+{
+  "id": "cp_run_b72acd1cd64c_001",
+  "run_id": "run_b72acd1cd64c",
+  "created_at": "2026-02-02T19:21:09.889031+00:00",
+  "description": "Starting task 1",
+  "task_graph_state": {
+    "nodes": {
+      "1": {
+        "id": "1",
+        "subtask": {
+          "id": "1",
+          "title": "Define the Fibonacci function signature",
+          "description": "Create a new Python file in the 'src' directory and define a function named `fibonacci` that takes an integer as input and returns the corresponding Fibonacci number.",
+          "acceptance_criteria": [
+            "The function should handle non-negative integers",
+            "The function should return the correct Fibonacci number for given inputs"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [],
+          "estimated_complexity": "low"
+        },
+        "status": "running",
+        "dependencies": [],
+        "dependents": [
+          "2",
+          "3",
+          "4",
+          "10"
+        ],
+        "started_at": 

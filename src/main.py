@@ -20,13 +20,12 @@ from typing import Optional
 
 import click
 from rich.console import Console
-from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 # Import configuration first to validate
 try:
-    from src.config import Configuration, load_config
+    from src.config import Configuration, get_config
 except ImportError as e:
     click.echo(f"Error loading configuration: {e}", err=True)
     sys.exit(1)
@@ -58,8 +57,26 @@ def get_default_state_dir() -> Path:
     return Path.cwd() / ".lca"
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version="0.1.0", prog_name="Local Coding Agents")
+@click.argument("task", required=False)
+@click.option(
+    "--workspace", "-w",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Workspace directory (default: ./workspace)",
+)
+@click.option(
+    "--run-id", "-r",
+    type=str,
+    default=None,
+    help="Custom run ID (auto-generated if not provided)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Validate task without executing",
+)
 @click.option(
     "--config", "-c",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -71,7 +88,15 @@ def get_default_state_dir() -> Path:
     help="Enable verbose output",
 )
 @click.pass_context
-def cli(ctx: click.Context, config: Optional[Path], verbose: bool) -> None:
+def cli(
+    ctx: click.Context,
+    task: Optional[str],
+    workspace: Optional[Path],
+    run_id: Optional[str],
+    dry_run: bool,
+    config: Optional[Path],
+    verbose: bool,
+) -> None:
     """
     Local Coding Agents - A production-grade local AI coding system.
     
@@ -85,13 +110,16 @@ def cli(ctx: click.Context, config: Optional[Path], verbose: bool) -> None:
         if config:
             cfg = Configuration.from_yaml(config)
         else:
-            cfg = load_config()
+            cfg = get_config()
         ctx.obj["config"] = cfg
     except Exception as e:
         console.print(f"[red]Error loading configuration: {e}[/red]")
         sys.exit(1)
     
     ctx.obj["verbose"] = verbose
+
+    if task and ctx.invoked_subcommand is None:
+        _execute_task(ctx, task, workspace, run_id, dry_run)
 
 
 @cli.command()
@@ -132,40 +160,48 @@ def run(
         
         lca run "Add error handling to the database module" -w ./myproject
     """
+    _execute_task(ctx, task, workspace, run_id, dry_run)
+
+
+def _execute_task(
+    ctx: click.Context,
+    task: str,
+    workspace: Optional[Path],
+    run_id: Optional[str],
+    dry_run: bool,
+) -> None:
     config: Configuration = ctx.obj["config"]
     verbose: bool = ctx.obj["verbose"]
-    
+
     # Set up paths
     workspace_path = workspace or get_default_workspace()
     log_dir = get_default_log_dir()
     state_dir = get_default_state_dir()
-    
+
     # Ensure directories exist
     workspace_path.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
-    
-    console.print(Panel(
-        f"[bold]Task:[/bold] {task}\n"
-        f"[bold]Workspace:[/bold] {workspace_path}\n"
-        f"[bold]Run ID:[/bold] {run_id or 'auto-generated'}",
-        title="Local Coding Agents",
-        border_style="blue",
-    ))
-    
+
+    console.print("[bold]Local Coding Agents[/bold]")
+    console.print(f"Task: {task}")
+    console.print(f"Workspace: {workspace_path}")
+    console.print(f"Run ID: {run_id or 'auto-generated'}")
+    console.print()
+
     if dry_run:
         console.print("[yellow]Dry run - validating only[/yellow]")
         # TODO: Add task validation
         console.print("[green]Task validation passed[/green]")
         return
-    
+
     # Initialize executor
     executor = Executor(
         config=config,
         workspace_root=workspace_path,
         log_dir=log_dir,
     )
-    
+
     # Run with progress display
     with Progress(
         SpinnerColumn(),
@@ -173,7 +209,7 @@ def run(
         console=console,
     ) as progress:
         progress.add_task(description="Executing task...", total=None)
-        
+
         try:
             result = executor.execute(task, run_id=run_id)
         except Exception as e:
@@ -181,14 +217,14 @@ def run(
             if verbose:
                 console.print_exception()
             sys.exit(1)
-    
+
     # Display results
     _display_result(result, verbose)
-    
+
     # Save state
     state_manager = RunStateManager(state_dir / "runs")
     # Note: Executor should save state, this is backup
-    
+
     if not result.success:
         sys.exit(1)
 
@@ -549,26 +585,22 @@ def _display_result(result: ExecutionResult, verbose: bool) -> None:
     """Display execution result."""
     if result.success:
         console.print()
-        console.print(Panel(
-            f"[green bold]✓ Task completed successfully[/green bold]\n\n"
-            f"Run ID: {result.run_id}\n"
-            f"Tasks: {result.subtasks_completed}/{result.subtasks_total}\n"
-            f"Duration: {result.total_duration_ms / 1000:.1f}s\n"
-            f"Tokens: {result.total_tokens:,}",
-            title="Success",
-            border_style="green",
-        ))
+        console.print(
+            "[green]✔ Done[/green]  "
+            f"{result.subtasks_completed}/{result.subtasks_total} tasks  "
+            f"• {result.total_duration_ms / 1000:.1f}s  "
+            f"• {result.total_tokens:,} tokens"
+        )
+        console.print(f"Run ID: {result.run_id}")
     else:
         console.print()
-        console.print(Panel(
-            f"[red bold]✗ Task failed[/red bold]\n\n"
-            f"Run ID: {result.run_id}\n"
-            f"Tasks: {result.subtasks_completed}/{result.subtasks_total}\n"
-            f"Reason: {result.termination_reason}\n"
-            f"Error: {result.error or 'Unknown'}",
-            title="Failed",
-            border_style="red",
-        ))
+        console.print(
+            "[red]✖ Failed[/red]  "
+            f"{result.subtasks_completed}/{result.subtasks_total} tasks  "
+            f"• {result.termination_reason}"
+        )
+        console.print(f"Run ID: {result.run_id}")
+        console.print(f"Error: {result.error or 'Unknown'}")
     
     # File changes
     if result.files_created or result.files_modified:

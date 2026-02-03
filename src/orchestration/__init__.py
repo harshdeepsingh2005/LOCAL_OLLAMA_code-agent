@@ -10,8 +10,8 @@ from src.orchestration.executor import (
     Executor,
 )
 from src.orchestration.loop_controller import (
-    Iteration,
     LoopController,
+    LoopIteration,
     LoopState,
     TerminationReason,
 )
@@ -22,8 +22,8 @@ from src.orchestration.rollback import (
 )
 from src.orchestration.task_graph import (
     TaskGraph,
+    TaskGraphStats,
     TaskNode,
-    TaskStats,
     TaskStatus,
 )
 
@@ -36,12 +36,12 @@ __all__ = [
     "TaskGraph",
     "TaskNode",
     "TaskStatus",
-    "TaskStats",
+    "TaskGraphStats",
     # Loop Controller
     "LoopController",
     "LoopState",
     "TerminationReason",
-    "Iteration",
+    "LoopIteration",
     # Rollback
     "RollbackManager",
     "Checkpoint",

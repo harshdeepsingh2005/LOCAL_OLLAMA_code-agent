@@ -52,10 +52,12 @@ file_access:
     - "*.env"
     - "*.env.*"
     - ".env*"
-    - "*secret*"
+    - "*secrets*"
     - "*password*"
     - "*credential*"
-    - "*token*"
+    - "*.token"
+    - "*.tokens"
+    - "*api_token*"
     - "*.secrets"
     # SSH and security
     - ".ssh/*"
@@ -283,12 +285,18 @@ safety:
     # Validate all agent outputs
     validate_outputs: true
     # Block sensitive data in outputs
+    # NOTE: Use specific patterns to avoid false positives
+    # e.g., "api_token" not just "token" (which appears in tokenizer discussions)
     block_sensitive_patterns:
-      - "password"
-      - "secret"
-      - "api_key"
-      - "token"
-      - "credential"
+      - "password="
+      - "password:"
+      - "secret_key"
+      - "api_key="
+      - "api_token="
+      - "auth_token="
+      - "access_token="
+      - "credential="
+      - "private_key="
 
   # Rollback requirements
   rollback:

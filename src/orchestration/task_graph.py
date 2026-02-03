@@ -380,7 +380,7 @@ class TaskGraph:
         """Serialize graph to dictionary for checkpointing."""
         return {
             "nodes": {
-                node_id: node.model_dump()
+                node_id: node.model_dump(mode="json")
                 for node_id, node in self._nodes.items()
             },
             "execution_order": self._execution_order,

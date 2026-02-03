@@ -1,0 +1,343 @@
+{
+  "id": "cp_run_b72acd1cd64c_000",
+  "run_id": "run_b72acd1cd64c",
+  "created_at": "2026-02-02T19:21:09.887597+00:00",
+  "description": "After planning",
+  "task_graph_state": {
+    "nodes": {
+      "1": {
+        "id": "1",
+        "subtask": {
+          "id": "1",
+          "title": "Define the Fibonacci function signature",
+          "description": "Create a new Python file in the 'src' directory and define a function named `fibonacci` that takes an integer as input and returns the corresponding Fibonacci number.",
+          "acceptance_criteria": [
+            "The function should handle non-negative integers",
+            "The function should return the correct Fibonacci number for given inputs"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [],
+        "dependents": [
+          "2",
+          "3",
+          "4",
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "2": {
+        "id": "2",
+        "subtask": {
+          "id": "2",
+          "title": "Implement the Fibonacci logic",
+          "description": "Write the logic inside the `fibonacci` function to calculate the Fibonacci number using either an iterative or recursive approach.",
+          "acceptance_criteria": [
+            "The function should correctly compute Fibonacci numbers for small inputs",
+            "The function should handle large inputs efficiently"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [
+            "1"
+          ],
+          "estimated_complexity": "medium"
+        },
+        "status": "pending",
+        "dependencies": [
+          "1"
+        ],
+        "dependents": [
+          "5",
+          "6",
+          "8",
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "3": {
+        "id": "3",
+        "subtask": {
+          "id": "3",
+          "title": "Write unit tests for the Fibonacci function",
+          "description": "Create a new Python file in the 'tests' directory and write unit tests to verify the correctness of the `fibonacci` function.",
+          "acceptance_criteria": [
+            "All test cases should pass",
+            "Edge cases (e.g., 0, 1) should be handled correctly"
+          ],
+          "target_files": [
+            "tests/test_fibonacci.py"
+          ],
+          "dependencies": [
+            "1"
+          ],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [
+          "1"
+        ],
+        "dependents": [
+          "7",
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "4": {
+        "id": "4",
+        "subtask": {
+          "id": "4",
+          "title": "Document the Fibonacci function",
+          "description": "Add docstrings to the `fibonacci` function explaining its purpose, parameters, and return value.",
+          "acceptance_criteria": [
+            "The docstring should be clear and comprehensive",
+            "It should include examples of how to use the function"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [
+            "1"
+          ],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [
+          "1"
+        ],
+        "dependents": [
+          "9",
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "5": {
+        "id": "5",
+        "subtask": {
+          "id": "5",
+          "title": "Handle edge cases in Fibonacci function",
+          "description": "Ensure that the `fibonacci` function correctly handles edge cases such as negative inputs and very large numbers.",
+          "acceptance_criteria": [
+            "The function should raise appropriate exceptions for invalid inputs",
+            "It should handle large numbers without causing performance issues"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [
+            "2"
+          ],
+          "estimated_complexity": "medium"
+        },
+        "status": "pending",
+        "dependencies": [
+          "2"
+        ],
+        "dependents": [
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "6": {
+        "id": "6",
+        "subtask": {
+          "id": "6",
+          "title": "Refactor Fibonacci function for efficiency",
+          "description": "Optimize the `fibonacci` function to improve performance, especially for large inputs.",
+          "acceptance_criteria": [
+            "The function should be faster than the initial implementation",
+            "It should still return correct results"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [
+            "2"
+          ],
+          "estimated_complexity": "high"
+        },
+        "status": "pending",
+        "dependencies": [
+          "2"
+        ],
+        "dependents": [
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "7": {
+        "id": "7",
+        "subtask": {
+          "id": "7",
+          "title": "Add performance tests for Fibonacci function",
+          "description": "Write additional unit tests to measure the performance of the `fibonacci` function with large inputs.",
+          "acceptance_criteria": [
+            "The performance test cases should pass",
+            "They should demonstrate that the function is efficient"
+          ],
+          "target_files": [
+            "tests/test_fibonacci.py"
+          ],
+          "dependencies": [
+            "3"
+          ],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [
+          "3"
+        ],
+        "dependents": [
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "8": {
+        "id": "8",
+        "subtask": {
+          "id": "8",
+          "title": "Review and refactor code for readability",
+          "description": "Refactor the `fibonacci` function to improve readability and maintainability.",
+          "acceptance_criteria": [
+            "The code should be clean and easy to understand",
+            "It should follow Python coding standards"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [
+            "2"
+          ],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [
+          "2"
+        ],
+        "dependents": [
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "9": {
+        "id": "9",
+        "subtask": {
+          "id": "9",
+          "title": "Update documentation with performance information",
+          "description": "Add information about the performance of the `fibonacci` function to its docstring.",
+          "acceptance_criteria": [
+            "The docstring should include details on performance",
+            "It should be clear and informative"
+          ],
+          "target_files": [
+            "src/fibonacci.py"
+          ],
+          "dependencies": [
+            "4"
+          ],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [
+          "4"
+        ],
+        "dependents": [
+          "10"
+        ],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      },
+      "10": {
+        "id": "10",
+        "subtask": {
+          "id": "10",
+          "title": "Final code review and testing",
+          "description": "Conduct a final code review to ensure all requirements are met and perform additional testing to confirm everything works as expected.",
+          "acceptance_criteria": [
+            "All subtasks should be completed",
+            "The function should pass all tests"
+          ],
+          "target_files": [],
+          "dependencies": [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9"
+          ],
+          "estimated_complexity": "low"
+        },
+        "status": "pending",
+        "dependencies": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9"
+        ],
+        "dependents": [],
+        "started_at": null,
+        "completed_at": null,
+        "execution_time_ms": null,
+        "error": null,
+        "result": {}
+      }
+    },
+    "execution_order": null
+  },
+  "current_task_id": null,
+  "file_snapshots": {},
+  "agent_history": [],
+  "tokens_used": 0,
+  "files_modified": 0,
+  "metadata": {}
+}

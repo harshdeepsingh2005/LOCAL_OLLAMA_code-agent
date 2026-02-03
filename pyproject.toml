@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "Production-grade local AI coding agent system for Apple Silicon"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [
     { name = "Local Coding Agents Team" }
 ]

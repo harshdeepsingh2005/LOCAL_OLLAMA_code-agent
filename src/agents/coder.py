@@ -239,14 +239,28 @@ You MUST respond with a valid JSON object in this exact format:
             if len(changes) > max_files:
                 changes = changes[:max_files]
             
-            return CoderOutput(
-                task_id=input_data.task_id,
-                status=AgentStatus.SUCCESS,
-                changes=changes,
-                implementation_notes=data.get("implementation_notes", ""),
-                confidence=data.get("confidence", "medium"),
-                concerns=data.get("concerns", []),
-                suggested_tests=data.get("suggested_tests", []),
+            # Normalize suggested_tests to list of strings
+            # (LLM sometimes returns dicts with description/code)
+            raw_tests = data.get("suggested_tests", [])
+            suggested_tests: list[str] = []
+            for test in raw_tests:
+                if isinstance(test, str):
+                    suggested_tests.append(test)
+                elif isinstance(test, dict):
+                    # Extract description or code from dict
+                    test_str = test.get("description") or test.get("code") or str(test)
+                    suggested_tests.append(test_str)
+            
+            return CoderOutput.model_validate(
+                {
+                    "task_id": input_data.task_id,
+                    "status": AgentStatus.SUCCESS,
+                    "changes": changes,
+                    "implementation_notes": data.get("implementation_notes", ""),
+                    "confidence": data.get("confidence", "medium"),
+                    "concerns": data.get("concerns", []),
+                    "suggested_tests": suggested_tests,
+                }
             )
             
         except (json.JSONDecodeError, KeyError, TypeError) as e:
