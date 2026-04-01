@@ -1023,7 +1023,8 @@ class TestMalformedOutputResilience:
         executor._coder.execute = _bad_coder  # type: ignore[assignment]
         executor._reviewer.execute = _bad_reviewer  # type: ignore[assignment]
         try:
-            result = executor.execute("Create a Python function that calculates fibonacci numbers", run_id="run_malformed_triplet")
+            with patch("src.orchestration.executor.LLMClient.health_check", return_value=True):
+                result = executor.execute("Create a Python function that calculates fibonacci numbers", run_id="run_malformed_triplet")
         finally:
             executor._planner.execute = p0  # type: ignore[assignment]
             executor._coder.execute = c0  # type: ignore[assignment]
@@ -1090,7 +1091,8 @@ class TestMalformedOutputResilience:
         executor._reviewer.execute = _seq_reviewer  # type: ignore[assignment]
         executor._fixer.execute = _bad_fixer  # type: ignore[assignment]
         try:
-            result = executor.execute("Modify calculator implementation", run_id="run_malformed_fixer")
+            with patch("src.orchestration.executor.LLMClient.health_check", return_value=True):
+                result = executor.execute("Modify calculator implementation", run_id="run_malformed_fixer")
         finally:
             executor._planner.execute = p0  # type: ignore[assignment]
             executor._coder.execute = c0  # type: ignore[assignment]
