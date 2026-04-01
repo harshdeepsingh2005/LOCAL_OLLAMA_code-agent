@@ -11,6 +11,7 @@ from src.core.context_manager import (
     ContextPriority,
     ContextType,
 )
+from src.core.memory import MemoryManager
 from src.core.diff_engine import (
     DiffEngine,
     DiffHunk,
@@ -54,6 +55,30 @@ from src.core.file_lock import (
     FileLockManager,
     FileLockTimeout,
 )
+# ── New capability modules ──
+from src.core.pty_shell import PTYSession, PTYShellManager, PTYShellError
+from src.core.mcp_client import (
+    MCPClient,
+    MCPServerConfig,
+    MCPToolSchema,
+    MCPCallResult,
+)
+from src.core.hitl import (
+    HITLGate,
+    HITLConfig,
+    HITLResult,
+    HITLDecision,
+    PermissionLevel,
+    classify_command,
+)
+from src.core.file_editing_tools import FileEditingTools
+from src.core.semantic_search import (
+    GrepSearch,
+    SemanticSearch,
+    CodebaseNavigator,
+    SearchResult,
+)
+from src.core.agent_tools import ToolExecutor, TOOL_SCHEMAS, get_tools_system_prompt
 
 __all__ = [
     # Context Manager
@@ -62,6 +87,8 @@ __all__ = [
     "ContextManager",
     "ContextPriority",
     "ContextType",
+    # Memory
+    "MemoryManager",
     # Diff Engine
     "DiffEngine",
     "DiffHunk",
@@ -99,4 +126,31 @@ __all__ = [
     "FileLockError",
     "FileLockManager",
     "FileLockTimeout",
+    # ── Feature 1: Persistent PTY shell ──
+    "PTYSession",
+    "PTYShellManager",
+    "PTYShellError",
+    # ── Feature 2: Native MCP client ──
+    "MCPClient",
+    "MCPServerConfig",
+    "MCPToolSchema",
+    "MCPCallResult",
+    # ── Feature 3: HITL security ──
+    "HITLGate",
+    "HITLConfig",
+    "HITLResult",
+    "HITLDecision",
+    "PermissionLevel",
+    "classify_command",
+    # ── Feature 4: Granular file editing tools ──
+    "FileEditingTools",
+    # ── Feature 6: Semantic codebase navigation ──
+    "GrepSearch",
+    "SemanticSearch",
+    "CodebaseNavigator",
+    "SearchResult",
+    # ── Upgraded tool executor ──
+    "ToolExecutor",
+    "TOOL_SCHEMAS",
+    "get_tools_system_prompt",
 ]

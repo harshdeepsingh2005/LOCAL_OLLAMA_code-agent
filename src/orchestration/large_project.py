@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 @dataclass
@@ -55,8 +55,7 @@ class TaskShard(BaseModel):
     estimated_tokens: int = 0
     context_summary: str = ""  # Summary from previous shard
     
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ShardSummary(BaseModel):

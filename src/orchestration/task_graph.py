@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterator
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.agents.base import Subtask
 
@@ -51,8 +51,7 @@ class TaskNode(BaseModel):
     # Results
     result: dict[str, Any] = Field(default_factory=dict)
     
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     def is_ready(self, graph: "TaskGraph") -> bool:
         """Check if all dependencies are satisfied."""

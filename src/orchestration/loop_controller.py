@@ -282,6 +282,23 @@ class LoopController:
     def reset_fix_counter(self) -> None:
         """Reset the fix iteration counter (e.g., when moving to new task)."""
         self._fix_iteration_count = 0
+
+    def reset_for_new_task(self) -> None:
+        """
+        Reset loop state for a brand-new task in the same session.
+
+        This preserves controller identity (same run/session), but provides
+        a fresh per-task execution budget and timing window.
+        """
+        self._state = LoopState.PLANNING
+        self._iteration_count = 0
+        self._fix_iteration_count = 0
+        self._planning_cycle_count = 0
+        self._agent_retries.clear()
+        self._termination_reason = None
+        self._termination_message = None
+        self._needs_user_continue = False
+        self._start_time = time.perf_counter()
     
     @property
     def needs_user_continue(self) -> bool:

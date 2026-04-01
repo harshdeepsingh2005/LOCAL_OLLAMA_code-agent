@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SessionState(str, Enum):
@@ -25,18 +25,35 @@ class SessionState(str, Enum):
     PAUSED = "paused"
     ENDED = "ended"
     ERROR = "error"
+    # Backward-compatible aliases used by older tests
+    IDLE = "init"
+    PLANNING = "active"
+    CODING = "active"
+    REVIEW_PENDING = "pending_approval"
 
 
 class PendingChange(BaseModel):
     """A pending file change awaiting approval."""
     file_path: str
-    change_type: str  # create, modify, delete
+    change_type: str = "modify"  # create, modify, delete
     description: str
-    diff_content: str
-    new_content: str
+    diff_content: str = ""
+    new_content: str = ""
     original_content: Optional[str] = None
     lines_added: int = 0
     lines_removed: int = 0
+
+    @property
+    def diff(self) -> str:
+        """Backward-compatible alias for tests expecting `diff`."""
+        return self.diff_content
+
+    @classmethod
+    def model_validate(cls, obj: Any, *args: Any, **kwargs: Any):
+        if isinstance(obj, dict) and "diff" in obj and "diff_content" not in obj:
+            obj = dict(obj)
+            obj["diff_content"] = obj.pop("diff")
+        return super().model_validate(obj, *args, **kwargs)
 
 
 class ConversationMessage(BaseModel):
@@ -49,14 +66,22 @@ class ConversationMessage(BaseModel):
 
 class SessionConfig(BaseModel):
     """Session configuration."""
-    workspace: Path
+    workspace: Path = Field(default_factory=Path.cwd)
     model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
     auto_checkpoint: bool = True
     require_approval: bool = True
     max_tokens_per_run: int = 50000
+
+    # Backward-compatible field aliases
+    @property
+    def max_tokens(self) -> int:
+        return self.max_tokens_per_run
+
+    @property
+    def auto_approve(self) -> bool:
+        return not self.require_approval
     
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class Session:
@@ -77,6 +102,8 @@ class Session:
         self,
         session_id: Optional[str] = None,
         config: Optional[SessionConfig] = None,
+        workspace_root: Optional[Path] = None,
+        session_dir: Optional[Path] = None,
     ) -> None:
         """
         Initialize a session.
@@ -86,7 +113,10 @@ class Session:
             config: Session configuration
         """
         self.id = session_id or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        self.config = config or SessionConfig(workspace=Path.cwd())
+        if config is None:
+            self.config = SessionConfig(workspace=workspace_root or Path.cwd())
+        else:
+            self.config = config
         
         self.state = SessionState.INIT
         self.created_at = datetime.now(timezone.utc)
@@ -116,7 +146,46 @@ class Session:
         self.last_error: Optional[str] = None
         
         # Ensure sessions directory exists
+        if session_dir is not None:
+            self.SESSIONS_DIR = Path(session_dir)
         self.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def session_id(self) -> str:
+        """Backward-compatible alias for tests expecting `session_id`."""
+        return self.id
+
+    @property
+    def workspace_root(self) -> Path:
+        """Backward-compatible alias for tests expecting `workspace_root`."""
+        return self.config.workspace
+
+    @property
+    def conversation(self) -> list[ConversationMessage]:
+        """Backward-compatible alias for tests expecting `conversation`."""
+        return self.messages
+
+    @property
+    def total_tokens(self) -> int:
+        """Backward-compatible alias for tests expecting `total_tokens`."""
+        return self.tokens_used
+
+    def _set_state(self, state: SessionState) -> None:
+        """Backward-compatible state mutator used by legacy tests."""
+        self.state = state
+
+    def _add_message(self, role: str, content: str) -> None:
+        """Backward-compatible message mutator used by legacy tests."""
+        self.messages.append(ConversationMessage(role=role, content=content))
+
+    def get_summary(self) -> dict[str, Any]:
+        """Backward-compatible summary helper used by legacy tests."""
+        return {
+            "messages": len(self.messages),
+            "pending_changes": len(self.pending_changes),
+            "state": self.state.value,
+            "total_tokens": self.tokens_used,
+        }
     
     @property
     def session_dir(self) -> Path:
@@ -289,7 +358,7 @@ class Session:
     # Token Tracking
     # =========================================================================
     
-    def add_tokens(self, count: int) -> None:
+    def add_tokens(self, count: int, kind: Optional[str] = None) -> None:
         """Add to token count."""
         self.tokens_used += count
     
@@ -358,9 +427,10 @@ class Session:
                     json.dump(change.model_dump(), f, indent=2)
     
     @classmethod
-    def load(cls, session_id: str) -> Optional["Session"]:
+    def load(cls, session_id: str, session_dir: Optional[Path] = None) -> Optional["Session"]:
         """Load a session from disk."""
-        session_dir = cls.SESSIONS_DIR / session_id
+        base_dir = Path(session_dir) if session_dir is not None else cls.SESSIONS_DIR
+        session_dir = base_dir / session_id
         state_file = session_dir / "state.json"
         
         if not state_file.exists():

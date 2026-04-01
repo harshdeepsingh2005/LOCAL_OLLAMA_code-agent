@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from diff_match_patch import diff_match_patch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DiffType(str, Enum):
@@ -73,8 +73,7 @@ class FileDiff(BaseModel):
     description: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @property
     def lines_added(self) -> int:

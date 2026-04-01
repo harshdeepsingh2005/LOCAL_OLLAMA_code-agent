@@ -612,6 +612,121 @@ def _display_result(result: ExecutionResult, verbose: bool) -> None:
             console.print(f"  [yellow]~[/yellow] {f}")
 
 
+@cli.command()
+@click.option(
+    "--workspace", "-w",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Workspace directory (default: ./workspace)",
+)
+@click.option(
+    "--autonomous",
+    is_flag=True,
+    default=False,
+    help="Skip HITL prompts — auto-approve ALL commands (use with care)",
+)
+@click.pass_context
+def chat(ctx: click.Context, workspace: Optional[Path], autonomous: bool) -> None:
+    """
+    Start a conversational REPL session (Feature 5).
+
+    Run tasks interactively. Press Ctrl+C at any time to interrupt the
+    agent mid-task, type a correction, and the agent will re-plan on the fly.
+
+    Examples:
+
+        lca chat
+
+        lca chat --workspace ./myproject --autonomous
+    """
+    from src.core.hitl import HITLConfig
+    from src.cli.repl import ConversationalREPL
+
+    config: Configuration = ctx.obj["config"]
+    workspace_path = workspace or get_default_workspace()
+    log_dir = get_default_log_dir()
+
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    hitl_config = HITLConfig(fully_autonomous=autonomous)
+
+    repl = ConversationalREPL(
+        config=config,
+        workspace_root=workspace_path,
+        log_dir=log_dir,
+    )
+    # Stash hitl_config so the REPL passes it to each Executor
+    repl._hitl_config = hitl_config  # type: ignore[attr-defined]
+    repl.run()
+
+
+@cli.group()
+def mcp() -> None:
+    """MCP (Model Context Protocol) server management (Feature 2)."""
+    pass
+
+
+@mcp.command(name="connect")
+@click.argument("server_id", type=str)
+@click.argument("command", type=str)
+@click.argument("args", nargs=-1, type=str)
+@click.pass_context
+def mcp_connect(
+    ctx: click.Context,
+    server_id: str,
+    command: str,
+    args: tuple[str, ...],
+) -> None:
+    """
+    Connect to an MCP server and list its tools.
+
+    SERVER_ID  — a short name for this server (e.g. 'github', 'postgres')
+    COMMAND    — the server executable (e.g. 'npx')
+    ARGS       — arguments for the command (e.g. '-y @modelcontextprotocol/server-github')
+
+    Example:
+
+        lca mcp connect github npx -y @modelcontextprotocol/server-github
+    """
+    from src.core.mcp_client import MCPClient, MCPServerConfig
+
+    config_obj = MCPServerConfig(
+        server_id=server_id,
+        command=command,
+        args=list(args),
+    )
+    client = MCPClient()
+    try:
+        client.register_server(config_obj)
+        tools = client.fetch_tools(server_id)
+        console.print(
+            f"[green]✓ Connected to MCP server '{server_id}' "
+            f"({len(tools)} tools)[/green]"
+        )
+        for t in tools:
+            console.print(f"  • [cyan]{t.name}[/cyan] — {t.description[:70]}")
+    except Exception as e:
+        console.print(f"[red]Failed to connect: {e}[/red]")
+    finally:
+        client.close_all()
+
+
+@mcp.command(name="list-tools")
+@click.argument("server_id", type=str)
+@click.argument("command", type=str)
+@click.argument("args", nargs=-1, type=str)
+@click.pass_context
+def mcp_list_tools(
+    ctx: click.Context,
+    server_id: str,
+    command: str,
+    args: tuple[str, ...],
+) -> None:
+    """List tools exposed by an MCP server (connects temporarily)."""
+    ctx.invoke(mcp_connect, server_id=server_id, command=command, args=args)
+
+
 def main() -> None:
     """Main entry point."""
     cli(obj={})
@@ -619,3 +734,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

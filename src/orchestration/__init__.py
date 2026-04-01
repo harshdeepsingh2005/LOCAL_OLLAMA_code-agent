@@ -33,6 +33,14 @@ from src.orchestration.large_project import (
     ShardSummary,
     TaskShard,
 )
+from src.orchestration.context_pipeline import (
+    ContextBuilder,
+    ContextPacket,
+    TaskDomain,
+    TaskRoute,
+    TaskRouter,
+    ValidationLayer,
+)
 
 __all__ = [
     # Executor
@@ -59,4 +67,11 @@ __all__ = [
     "ShardConfig",
     "ShardSummary",
     "TaskShard",
+    # Context pipeline
+    "TaskDomain",
+    "TaskRoute",
+    "TaskRouter",
+    "ContextPacket",
+    "ContextBuilder",
+    "ValidationLayer",
 ]

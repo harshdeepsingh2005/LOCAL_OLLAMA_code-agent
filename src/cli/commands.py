@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -66,6 +67,12 @@ class CommandHandler:
         
         # Undo stack
         self._undo_stack: list[dict[str, Any]] = []
+        self._should_exit: bool = False
+
+    def parse(self, input_text: str) -> tuple[str, str]:
+        """Backward-compatible parser expected by older tests."""
+        command, args = self.parse_command(input_text)
+        return command.lstrip("/"), " ".join(args)
     
     def set_context(
         self,
@@ -376,6 +383,7 @@ class CommandHandler:
                 return None
         
         self.session.end()
+        self._should_exit = True
         return "exit"
     
     def _cmd_clear(self, args: list[str]) -> None:
@@ -497,7 +505,7 @@ class CommandHandler:
             temp_path = f.name
         
         # Open in editor
-        editor = subprocess.getenv("EDITOR", "vim")
+        editor = os.getenv("EDITOR", "vim")
         try:
             subprocess.run([editor, temp_path], check=True)
             self.display.info("Review complete. Changes unchanged.")

@@ -7,10 +7,11 @@ Provides Claude Code–like experience with human-in-the-loop safety.
 
 from __future__ import annotations
 
+import re
 import signal
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import click
 
@@ -225,6 +226,14 @@ class AgentCLI:
                     if not self.commands.handle_approval(response):
                         break
                     continue
+
+                self.display.session_status_line(
+                    model=self.session.config.model,
+                    project_mode=self._project_mode,
+                    tokens_used=self.session.tokens_used,
+                    tokens_limit=self.session.config.max_tokens_per_run,
+                    pending_changes=len(self.session.pending_changes),
+                )
                 
                 # Get user input
                 try:
@@ -299,23 +308,27 @@ class AgentCLI:
         Returns:
             True if successful
         """
+        self._maybe_show_scope_shift_hint(task)
         self.session.add_user_message(task)
         
         try:
             log_dir = Path.home() / ".local" / "share" / "agent" / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
+
+            if not self._preview_and_confirm_plan(task, log_dir):
+                self.display.info("Task cancelled before implementation")
+                return False
             
             # In project mode, reuse executor for iterative development
             if self._project_mode and self._executor is not None:
                 self.display.info(f"[Project Mode] Continuing on same project...")
                 result = self._execute_with_continuation(
-                    lambda: self._executor.execute_additional_task(task)
+                    execute_fn=lambda: self._executor.execute_additional_task(task),
+                    continue_fn=lambda: self._executor.continue_execution(),
                 )
             else:
                 # Create new executor for this task
-                if not self._project_mode:
-                    self.display.info("Planning...")
-                else:
+                if self._project_mode:
                     self.display.info("[Project Mode] Starting new project...")
                 
                 executor = Executor(
@@ -329,17 +342,19 @@ class AgentCLI:
                     self._executor = executor
                 
                 result = self._execute_with_continuation(
-                    lambda: executor.execute(task, run_id=self.session.id)
+                    execute_fn=lambda: executor.execute(task, run_id=self.session.id),
+                    continue_fn=lambda: executor.continue_execution(),
                 )
             
             # Update session
-            self.session.add_tokens(result.total_tokens)
+            self.session.add_tokens(result.tokens_delta)
             
             if result.success:
+                shown_tokens = result.tokens_delta if result.tokens_delta > 0 else result.total_tokens
                 self.display.success(
                     f"Done - {result.subtasks_completed}/{result.subtasks_total} tasks • "
                     f"{result.total_duration_ms / 1000:.1f}s • "
-                    f"{result.total_tokens:,} tokens"
+                    f"{shown_tokens:,} tokens"
                 )
                 self.display.raw(f"Run ID: {result.run_id}")
                 
@@ -366,8 +381,111 @@ class AgentCLI:
             self.display.error(f"Task execution failed: {e}")
             self.session.set_error(str(e))
             return False
+
+    def _maybe_show_scope_shift_hint(self, new_task: str) -> None:
+        """Show a lightweight hint when task scope appears to shift significantly."""
+        previous_user_tasks = [
+            m.content
+            for m in self.session.messages
+            if m.role == "user" and m.content.strip()
+        ]
+        if not previous_user_tasks:
+            return
+
+        previous = previous_user_tasks[-1]
+        prev_tokens = self._extract_scope_tokens(previous)
+        new_tokens = self._extract_scope_tokens(new_task)
+        if not prev_tokens or not new_tokens:
+            return
+
+        overlap = len(prev_tokens & new_tokens)
+        union = len(prev_tokens | new_tokens)
+        similarity = overlap / union if union else 1.0
+
+        prev_paths = self._extract_path_hints(previous)
+        new_paths = self._extract_path_hints(new_task)
+        path_overlap = bool(prev_paths & new_paths)
+
+        if similarity < 0.18 and not path_overlap:
+            self.display.warning(
+                "Possible scope shift detected. Consider starting a fresh context for better reasoning."
+            )
+            self.display.info("Tip: use /clear to reset conversation context before continuing.")
+
+    @staticmethod
+    def _extract_scope_tokens(text: str) -> set[str]:
+        """Extract lexical scope tokens from a task prompt."""
+        stopwords = {
+            "the", "and", "for", "with", "from", "that", "this", "into", "about",
+            "please", "need", "want", "make", "add", "fix", "update", "change",
+            "file", "files", "code", "task", "agent", "project", "run", "test",
+        }
+        raw_tokens = re.findall(r"[a-zA-Z0-9_\-/\.]+", text.lower())
+        tokens: set[str] = set()
+        for token in raw_tokens:
+            clean = token.strip("._-/")
+            if len(clean) < 4:
+                continue
+            if clean in stopwords:
+                continue
+            tokens.add(clean)
+        return tokens
+
+    @staticmethod
+    def _extract_path_hints(text: str) -> set[str]:
+        """Extract likely file/module path hints from user text."""
+        matches = re.findall(r"[a-zA-Z0-9_\-/]+\.[a-zA-Z0-9]+", text)
+        return {m.lower() for m in matches}
+
+    def _preview_and_confirm_plan(self, task: str, log_dir: Path) -> bool:
+        """Preview plan and request approval before implementation begins."""
+        self.display.info("Planning...")
+
+        preview_executor = Executor(
+            config=self.config,
+            workspace_root=self.workspace,
+            log_dir=log_dir,
+        )
+
+        try:
+            plan = preview_executor.preview_plan(task, run_id=self.session.id)
+        except Exception as e:
+            self.display.warning(f"Plan preview failed: {e}")
+            fallback = self.display.confirm(
+                "Continue without plan preview?",
+                default=True,
+            )
+            return fallback == "y"
+
+        plan_tasks = [
+            {
+                "title": subtask.title,
+                "description": subtask.description,
+                "status": "not_started",
+            }
+            for subtask in plan.subtasks
+        ]
+        self.display.plan(
+            summary=plan.plan_summary or f"Planned {len(plan.subtasks)} task(s)",
+            tasks=plan_tasks,
+        )
+
+        if plan.identified_risks:
+            self.display.subheader("Identified Risks")
+            for risk in plan.identified_risks[:5]:
+                self.display.raw(f"  - {risk}")
+
+        response = self.display.confirm(
+            "Proceed with implementation using this plan?",
+            default=True,
+        )
+        return response == "y"
     
-    def _execute_with_continuation(self, execute_fn) -> ExecutionResult:
+    def _execute_with_continuation(
+        self,
+        execute_fn: Callable[[], ExecutionResult],
+        continue_fn: Callable[[], ExecutionResult],
+    ) -> ExecutionResult:
         """
         Execute a function that returns ExecutionResult, handling continuation prompts.
         
@@ -380,6 +498,10 @@ class AgentCLI:
         with self.display.spinner("Executing...") as progress:
             progress.add_task(description="Working on task...", total=None)
             result = execute_fn()
+
+        total_token_delta = result.tokens_delta if result.tokens_delta else result.total_tokens
+        created_files = set(result.files_created)
+        modified_files = set(result.files_modified)
         
         # Handle continuation loop
         while result.needs_continuation:
@@ -398,7 +520,17 @@ class AgentCLI:
             self.display.info("Continuing with 10 more iterations...")
             with self.display.spinner("Continuing...") as progress:
                 progress.add_task(description="Continuing task...", total=None)
-                result = self._executor.continue_execution() if self._executor else result
+                result = continue_fn()
+
+            step_delta = result.tokens_delta if result.tokens_delta else result.total_tokens
+            total_token_delta += step_delta
+            created_files.update(result.files_created)
+            modified_files.update(result.files_modified)
+
+        modified_files -= created_files
+        result.tokens_delta = total_token_delta
+        result.files_created = sorted(created_files)
+        result.files_modified = sorted(modified_files)
         
         return result
     

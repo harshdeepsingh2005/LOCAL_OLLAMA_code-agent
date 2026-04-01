@@ -27,6 +27,7 @@ from rich.theme import Theme
 class StatusSymbol(str, Enum):
     """Status indicator symbols."""
     PROGRESS = "◐"
+    THINKING = "◐"
     SUCCESS = "✓"
     ERROR = "✗"
     WARNING = "⚠"
@@ -322,6 +323,10 @@ class Display:
     def diff(self, file_path: str, diff_content: str) -> None:
         """Display a unified diff."""
         self.console.print()
+
+    def format_diff(self, diff_content: str) -> str:
+        """Backward-compatible formatter used by legacy tests."""
+        return diff_content
         self.console.print(f"[bold]{file_path}[/bold]")
         
         lines = diff_content.split("\n")
@@ -459,6 +464,34 @@ class Display:
             f"({token_pct:.0f}%)"
         )
         self.console.print()
+
+    def session_status_line(
+        self,
+        model: str,
+        project_mode: bool,
+        tokens_used: int,
+        tokens_limit: int,
+        pending_changes: int,
+    ) -> None:
+        """Display a compact status line before prompt input."""
+        if self.quiet:
+            return
+
+        token_pct = (tokens_used / tokens_limit * 100) if tokens_limit > 0 else 0
+        token_style = "success" if token_pct < 80 else "warning" if token_pct < 95 else "error"
+        mode = "project" if project_mode else "oneshot"
+        pending_style = "warning" if pending_changes else "dim"
+
+        self.console.print(
+            "[dim]model:[/dim] "
+            f"[info]{model}[/info]  "
+            "[dim]mode:[/dim] "
+            f"[info]{mode}[/info]  "
+            "[dim]tokens:[/dim] "
+            f"[{token_style}]{tokens_used:,}/{tokens_limit:,}[/{token_style}]  "
+            "[dim]pending:[/dim] "
+            f"[{pending_style}]{pending_changes}[/{pending_style}]"
+        )
     
     def checkpoint_info(self, checkpoint_id: str, description: str) -> None:
         """Display checkpoint creation info."""

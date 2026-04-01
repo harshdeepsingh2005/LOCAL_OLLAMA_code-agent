@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import tiktoken
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ContextPriority(Enum):
@@ -51,8 +51,7 @@ class ContextItem(BaseModel):
     tokens: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
     
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     def __lt__(self, other: "ContextItem") -> bool:
         """Compare by priority for sorting."""
