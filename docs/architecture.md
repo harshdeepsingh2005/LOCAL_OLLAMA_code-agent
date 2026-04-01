@@ -2,7 +2,18 @@
 
 ## Overview
 
-Local Coding Agents (LCA) is a production-grade system for autonomous code generation that runs entirely offline on Apple Silicon hardware with 16GB RAM. The system uses local LLM inference through Ollama.
+`LOCAL_OLLAMA_code-agent` is a local-first, contract-driven multi-agent coding runtime. It coordinates planning, implementation, review, and fix loops through strict schemas, bounded execution limits, and guarded file operations.
+
+This document describes the current architecture. For the full documentation set, see:
+
+- `docs/agent_contracts.md`
+- `docs/execution_flow.md`
+- `docs/tools.md`
+- `docs/safety_and_constraints.md`
+- `docs/extending_the_system.md`
+- `docs/testing.md`
+- `docs/known_issues.md`
+- `docs/roadmap.md`
 
 ## Design Principles
 
