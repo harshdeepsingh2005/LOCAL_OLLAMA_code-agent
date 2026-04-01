@@ -27,7 +27,15 @@ from src.agents.base import (
     CoderInput,
     CoderOutput,
     Subtask,
+    ToolCall,
 )
+from src.agents.json_utils import is_safe_relative_path, parse_json_object
+from src.agents import json_utils as _json_utils
+from src.core.agent_tools import TOOL_SCHEMAS
+from src.core.agent_tools import get_tools_system_prompt
+
+
+ALLOWED_TOOL_NAMES: set[str] = {schema["name"] for schema in TOOL_SCHEMAS if "name" in schema}
 
 
 class CoderAgent(BaseAgent[CoderInput, CoderOutput]):
@@ -48,6 +56,7 @@ class CoderAgent(BaseAgent[CoderInput, CoderOutput]):
     
     @property
     def system_prompt(self) -> str:
+        tools_prompt = get_tools_system_prompt()
         return """You are an expert software engineer implementing code changes.
 
 Your role is to generate high-quality code that fulfills the given subtask requirements.
@@ -58,6 +67,21 @@ Your role is to generate high-quality code that fulfills the given subtask requi
 3. Follow best practices for the language/framework
 4. Include proper error handling
 5. Provide implementation notes explaining your approach
+6. If needed, call tools to gather context or skills before finalizing changes
+
+## Available Tools:
+Use tools to inspect repository state, search implementation patterns, run tests, and validate assumptions before finalizing changes.
+
+""" + tools_prompt + """
+
+## Tool Usage Rules:
+- Prefer tool-grounded implementation over assumptions.
+- Use search/read tools before writing code in unfamiliar files.
+- Run relevant tests/checks where possible via tool calls.
+- Return `tool_calls` when more evidence or validation is needed; otherwise use an empty list.
+- If target files are missing or ambiguous, request tool calls instead of guessing paths.
+- Align every change with acceptance criteria and existing repository patterns.
+- Reason in explicit sections: request intent, relevant files, constraints, implementation plan, verification.
 
 ## Output Format:
 You MUST respond with a valid JSON object in this exact format:
@@ -69,6 +93,16 @@ You MUST respond with a valid JSON object in this exact format:
             "change_type": "create|modify|delete",
             "description": "What this change does",
             "new_content": "Full file content here",
+            "hunks": [
+                {
+                    "start_line": 10,
+                    "end_line": 14,
+                    "original_content": "old text",
+                    "new_content": "new text",
+                    "context_before": ["..."],
+                    "context_after": ["..."]
+                }
+            ],
             "lines_added": 10,
             "lines_removed": 5
         }
@@ -76,7 +110,10 @@ You MUST respond with a valid JSON object in this exact format:
     "implementation_notes": "Explanation of the approach taken",
     "confidence": "low|medium|high",
     "concerns": ["Any concerns about the implementation"],
-    "suggested_tests": ["Test cases that should be written"]
+    "suggested_tests": ["Test cases that should be written"],
+    "tool_calls": [
+        {"tool_name": "run_command", "arguments": {"command": "npm run test"}}
+    ]
 }
 ```
 
@@ -90,9 +127,11 @@ You MUST respond with a valid JSON object in this exact format:
 - Use meaningful variable names
 
 ## Important:
-- For "modify" changes, provide the COMPLETE new file content
+- For "modify" changes, prefer patch-style `hunks` for surgical edits when practical
+- If not using hunks, provide the COMPLETE new file content
 - For "create" changes, provide the full new file
 - For "delete" changes, set new_content to empty string
+- You may also provide `hunks` for surgical patch-style edits when appropriate
 - Always explain your implementation approach"""
     
     def _validate_input(
@@ -147,6 +186,11 @@ You MUST respond with a valid JSON object in this exact format:
             "**Acceptance Criteria:**",
         ]
         
+        # Inject memory if available
+        if context.memory_manager:
+            parts.append(context.memory_manager.get_all_context())
+            parts.append("")
+        
         for i, criterion in enumerate(input_data.subtask.acceptance_criteria, 1):
             parts.append(f"  {i}. {criterion}")
         
@@ -175,6 +219,11 @@ You MUST respond with a valid JSON object in this exact format:
             parts.append("## Additional Context:")
             parts.append(input_data.context)
             parts.append("")
+
+        parts.append("## Grounding Requirement:")
+        parts.append("Use the provided file contents and discovered paths as the source of truth.")
+        parts.append("If information is insufficient, return tool_calls to gather evidence before proposing changes.")
+        parts.append("")
         
         # Add constraints
         if input_data.constraints:
@@ -201,27 +250,31 @@ You MUST respond with a valid JSON object in this exact format:
     ) -> CoderOutput:
         """Parse LLM response into CoderOutput."""
         try:
-            # Extract JSON from response
-            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_str = response.strip()
-                if not json_str.startswith("{"):
-                    start = response.find("{")
-                    end = response.rfind("}") + 1
-                    if start != -1 and end > start:
-                        json_str = response[start:end]
-            
-            data = json.loads(json_str)
+            data = parse_json_object(response)
+            if not isinstance(data, dict):
+                raise TypeError("Coder response root must be a JSON object")
             
             # Parse code changes
             changes: list[CodeChange] = []
-            for change_data in data.get("changes", []):
+            raw_changes = data.get("changes", [])
+            if isinstance(raw_changes, dict):
+                raw_changes = [raw_changes]
+            if not isinstance(raw_changes, list):
+                raw_changes = []
+
+            for change_data in raw_changes:
+                if not isinstance(change_data, dict):
+                    continue
+
                 # Get original content if modifying
                 original = None
                 if change_data.get("change_type") == "modify":
                     original = input_data.file_contents.get(change_data.get("file_path", ""))
+
+                raw_hunks = change_data.get("hunks", [])
+                if not isinstance(raw_hunks, list):
+                    raw_hunks = []
+                hunks = [h for h in raw_hunks if isinstance(h, dict)]
                 
                 change = CodeChange(
                     file_path=change_data.get("file_path", ""),
@@ -229,10 +282,31 @@ You MUST respond with a valid JSON object in this exact format:
                     description=change_data.get("description", ""),
                     original_content=original,
                     new_content=change_data.get("new_content", ""),
+                    hunks=hunks,
                     lines_added=change_data.get("lines_added", 0),
                     lines_removed=change_data.get("lines_removed", 0),
                 )
+                if not is_safe_relative_path(change.file_path):
+                    raise TypeError(f"Unsafe file path emitted by coder: {change.file_path}")
                 changes.append(change)
+            
+            # Parse tool calls
+            tool_calls = []
+            raw_tool_calls = data.get("tool_calls", [])
+            if isinstance(raw_tool_calls, dict):
+                raw_tool_calls = [raw_tool_calls]
+            if not isinstance(raw_tool_calls, list):
+                raw_tool_calls = []
+
+            for tc in raw_tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tool_name = str(tc.get("tool_name", "")).strip()
+                if not tool_name:
+                    continue
+                if tool_name not in ALLOWED_TOOL_NAMES and not tool_name.startswith("mcp_"):
+                    continue
+                tool_calls.append(ToolCall(tool_name=tool_name, arguments=tc.get("arguments", {})))
             
             # Validate changes against limits
             max_files = context.config.limits.files.max_per_task
@@ -242,6 +316,10 @@ You MUST respond with a valid JSON object in this exact format:
             # Normalize suggested_tests to list of strings
             # (LLM sometimes returns dicts with description/code)
             raw_tests = data.get("suggested_tests", [])
+            if isinstance(raw_tests, (str, dict)):
+                raw_tests = [raw_tests]
+            if not isinstance(raw_tests, list):
+                raw_tests = []
             suggested_tests: list[str] = []
             for test in raw_tests:
                 if isinstance(test, str):
@@ -260,10 +338,11 @@ You MUST respond with a valid JSON object in this exact format:
                     "confidence": data.get("confidence", "medium"),
                     "concerns": data.get("concerns", []),
                     "suggested_tests": suggested_tests,
+                    "tool_calls": tool_calls,
                 }
             )
             
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
             # Return with parsing error
             return CoderOutput(
                 task_id=input_data.task_id,
@@ -271,7 +350,12 @@ You MUST respond with a valid JSON object in this exact format:
                 error=f"Failed to parse coder response: {e}",
                 error_context={"raw_response": response[:1000]},
             )
-    
+
+    @staticmethod
+    def _escape_control_chars_in_json_strings(raw_json: str) -> str:
+        """Backward-compatible wrapper for existing tests and callers."""
+        return _json_utils._escape_control_chars_in_strings(raw_json)
+
     def _create_error_output(
         self,
         input_data: CoderInput,

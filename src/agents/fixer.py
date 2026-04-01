@@ -18,6 +18,8 @@ import re
 import time
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from src.agents.base import (
     AgentContext,
     AgentStatus,
@@ -28,6 +30,27 @@ from src.agents.base import (
     FixerOutput,
     ReviewIssue,
 )
+from src.agents.json_utils import is_safe_relative_path, parse_json_object
+
+
+class FixerChangeSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    file_path: str
+    change_type: str = "modify"
+    description: str = ""
+    new_content: str = ""
+    lines_added: int = 0
+    lines_removed: int = 0
+
+
+class FixerResponseSchema(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    fixed_changes: list[FixerChangeSchema] = Field(default_factory=list)
+    issues_addressed: list[str] = Field(default_factory=list)
+    issues_not_addressed: list[str] = Field(default_factory=list)
+    fix_notes: str = ""
 
 
 class FixerAgent(BaseAgent[FixerInput, FixerOutput]):
@@ -208,35 +231,26 @@ You MUST respond with a valid JSON object in this exact format:
     ) -> FixerOutput:
         """Parse LLM response into FixerOutput."""
         try:
-            # Extract JSON from response
-            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_str = response.strip()
-                if not json_str.startswith("{"):
-                    start = response.find("{")
-                    end = response.rfind("}") + 1
-                    if start != -1 and end > start:
-                        json_str = response[start:end]
-            
-            data = json.loads(json_str)
+            data = parse_json_object(response)
+            schema = FixerResponseSchema.model_validate(data)
             
             # Parse fixed changes
             fixed_changes: list[CodeChange] = []
-            for change_data in data.get("fixed_changes", []):
+            for change_data in schema.fixed_changes:
                 # Get original content for reference
-                original = input_data.file_contents.get(change_data.get("file_path", ""))
+                original = input_data.file_contents.get(change_data.file_path)
                 
                 change = CodeChange(
-                    file_path=change_data.get("file_path", ""),
-                    change_type=change_data.get("change_type", "modify"),
-                    description=change_data.get("description", ""),
+                    file_path=change_data.file_path,
+                    change_type=change_data.change_type,
+                    description=change_data.description,
                     original_content=original,
-                    new_content=change_data.get("new_content", ""),
-                    lines_added=change_data.get("lines_added", 0),
-                    lines_removed=change_data.get("lines_removed", 0),
+                    new_content=change_data.new_content,
+                    lines_added=change_data.lines_added,
+                    lines_removed=change_data.lines_removed,
                 )
+                if not is_safe_relative_path(change.file_path):
+                    raise TypeError(f"Unsafe file path emitted by fixer: {change.file_path}")
                 fixed_changes.append(change)
             
             # Validate line changes against policy
@@ -251,17 +265,38 @@ You MUST respond with a valid JSON object in this exact format:
                     status=AgentStatus.REJECTED,
                     error=f"Fix exceeds line limit: {total_lines_changed} > {max_lines}",
                 )
+
+            issue_texts = [issue.description for issue in input_data.review_issues]
+            unresolved = list(schema.issues_not_addressed)
+            addressed = list(schema.issues_addressed)
+            for issue in issue_texts:
+                if issue not in addressed and all(issue not in item for item in unresolved):
+                    unresolved.append(f"{issue}: not mapped by fixer output")
+
+            confidence = self._score_fix_confidence(
+                changed_files=len({c.file_path for c in fixed_changes}),
+                unresolved_count=len(unresolved),
+            )
+            if context.telemetry:
+                context.telemetry.record_warning(
+                    "fixer_fix_validated",
+                    context={
+                        "fixed_changes": len(fixed_changes),
+                        "unresolved": len(unresolved),
+                        "confidence": round(confidence, 3),
+                    },
+                )
             
             return FixerOutput(
                 task_id=input_data.task_id,
                 status=AgentStatus.SUCCESS,
                 fixed_changes=fixed_changes,
-                issues_addressed=data.get("issues_addressed", []),
-                issues_not_addressed=data.get("issues_not_addressed", []),
-                fix_notes=data.get("fix_notes", ""),
+                issues_addressed=addressed,
+                issues_not_addressed=unresolved,
+                fix_notes=schema.fix_notes,
             )
             
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             # Return with parsing error
             return FixerOutput(
                 task_id=input_data.task_id,
@@ -269,6 +304,11 @@ You MUST respond with a valid JSON object in this exact format:
                 error=f"Failed to parse fixer response: {e}",
                 error_context={"raw_response": response[:1000]},
             )
+
+    @staticmethod
+    def _score_fix_confidence(changed_files: int, unresolved_count: int) -> float:
+        score = 0.35 + min(0.4, changed_files * 0.12) - min(0.45, unresolved_count * 0.15)
+        return max(0.0, min(1.0, score))
     
     def _create_error_output(
         self,

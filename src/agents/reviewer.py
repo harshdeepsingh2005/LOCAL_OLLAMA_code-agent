@@ -18,6 +18,8 @@ import re
 import time
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from src.agents.base import (
     AgentContext,
     AgentStatus,
@@ -29,6 +31,28 @@ from src.agents.base import (
     ReviewIssue,
     ReviewVerdict,
 )
+from src.agents.json_utils import is_safe_relative_path, parse_json_object
+
+
+class ReviewerIssueSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    severity: str = Field(default="minor")
+    file_path: str = Field(default="")
+    line_range: str | None = None
+    description: str = Field(default="")
+    suggestion: str = Field(default="")
+
+
+class ReviewerResponseSchema(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    verdict: str = Field(default="REQUEST_CHANGES")
+    task_complete: bool | None = None
+    summary: str = Field(default="")
+    issues: list[ReviewerIssueSchema] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    criteria_met: dict[str, bool] = Field(default_factory=dict)
 
 
 class ReviewerAgent(BaseAgent[ReviewerInput, ReviewerOutput]):
@@ -201,22 +225,11 @@ You MUST respond with a valid JSON object in this exact format:
     ) -> ReviewerOutput:
         """Parse LLM response into ReviewerOutput."""
         try:
-            # Extract JSON from response
-            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_str = response.strip()
-                if not json_str.startswith("{"):
-                    start = response.find("{")
-                    end = response.rfind("}") + 1
-                    if start != -1 and end > start:
-                        json_str = response[start:end]
-            
-            data = json.loads(json_str)
+            data = parse_json_object(response)
+            schema = ReviewerResponseSchema.model_validate(data)
             
             # Parse verdict
-            verdict_str = data.get("verdict", "REQUEST_CHANGES").upper()
+            verdict_str = schema.verdict.upper()
             try:
                 verdict = ReviewVerdict(verdict_str)
             except ValueError:
@@ -225,17 +238,22 @@ You MUST respond with a valid JSON object in this exact format:
             # Parse task_complete - EXPLICIT TERMINAL STATE
             # If verdict is APPROVE, default task_complete to True for backward compatibility
             # This ensures approval always terminates the loop
-            task_complete = data.get("task_complete", verdict == ReviewVerdict.APPROVE)
+            task_complete = schema.task_complete if schema.task_complete is not None else (verdict == ReviewVerdict.APPROVE)
             
             # Parse issues
             issues: list[ReviewIssue] = []
-            for issue_data in data.get("issues", []):
+            allowed_paths = {c.file_path for c in input_data.code_changes if c.file_path}
+            for issue_data in schema.issues:
+                if issue_data.file_path and not is_safe_relative_path(issue_data.file_path):
+                    continue
+                if issue_data.file_path and allowed_paths and issue_data.file_path not in allowed_paths:
+                    continue
                 issue = ReviewIssue(
-                    severity=issue_data.get("severity", "minor"),
-                    file_path=issue_data.get("file_path", ""),
-                    line_range=issue_data.get("line_range"),
-                    description=issue_data.get("description", ""),
-                    suggestion=issue_data.get("suggestion", ""),
+                    severity=issue_data.severity,
+                    file_path=issue_data.file_path,
+                    line_range=issue_data.line_range,
+                    description=issue_data.description,
+                    suggestion=issue_data.suggestion,
                 )
                 issues.append(issue)
             
@@ -243,6 +261,24 @@ You MUST respond with a valid JSON object in this exact format:
             # This prevents any scenario where APPROVE doesn't terminate
             if verdict == ReviewVerdict.APPROVE:
                 task_complete = True
+
+            severities = [i.severity.lower() for i in issues]
+            if any(sev in {"critical", "major"} for sev in severities):
+                task_complete = False
+                if verdict == ReviewVerdict.APPROVE:
+                    verdict = ReviewVerdict.REQUEST_CHANGES
+
+            confidence = self._score_review_confidence(issues=issues, criteria_met=schema.criteria_met)
+            if context.telemetry:
+                context.telemetry.record_warning(
+                    "reviewer_review_validated",
+                    context={
+                        "issues": len(issues),
+                        "verdict": verdict.value,
+                        "task_complete": bool(task_complete),
+                        "confidence": round(confidence, 3),
+                    },
+                )
             
             return ReviewerOutput(
                 task_id=input_data.task_id,
@@ -250,12 +286,12 @@ You MUST respond with a valid JSON object in this exact format:
                 verdict=verdict,
                 task_complete=task_complete,
                 issues=issues,
-                summary=data.get("summary", ""),
-                strengths=data.get("strengths", []),
-                criteria_met=data.get("criteria_met", {}),
+                summary=schema.summary,
+                strengths=list(schema.strengths),
+                criteria_met=dict(schema.criteria_met),
             )
             
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             # Return with parsing error
             return ReviewerOutput(
                 task_id=input_data.task_id,
@@ -263,6 +299,18 @@ You MUST respond with a valid JSON object in this exact format:
                 error=f"Failed to parse reviewer response: {e}",
                 error_context={"raw_response": response[:1000]},
             )
+
+    @staticmethod
+    def _score_review_confidence(issues: list[ReviewIssue], criteria_met: dict[str, bool]) -> float:
+        """Lightweight review confidence score for telemetry."""
+        score = 0.4
+        if criteria_met:
+            passed = sum(1 for v in criteria_met.values() if v)
+            score += min(0.35, passed * 0.08)
+
+        severe = sum(1 for i in issues if i.severity.lower() in {"critical", "major"})
+        score -= min(0.35, severe * 0.12)
+        return max(0.0, min(1.0, score))
     
     def _create_error_output(
         self,

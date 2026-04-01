@@ -18,6 +18,8 @@ import re
 import time
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from src.agents.base import (
     AgentContext,
     AgentStatus,
@@ -26,7 +28,50 @@ from src.agents.base import (
     PlannerInput,
     PlannerOutput,
     Subtask,
+    ToolCall,
 )
+from src.agents.json_utils import parse_json_object
+from src.core.agent_tools import TOOL_SCHEMAS, get_tools_system_prompt
+
+
+ALLOWED_TOOL_NAMES: set[str] = {schema["name"] for schema in TOOL_SCHEMAS if "name" in schema}
+
+
+class PlannerSubtaskSchema(BaseModel):
+    """Schema for a planner-produced subtask before conversion to contracts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=5, max_length=200)
+    description: str = Field(min_length=10, max_length=1000)
+    acceptance_criteria: list[str] = Field(default_factory=list, min_length=1)
+    target_files: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    estimated_complexity: str = Field(default="medium")
+
+
+class PlannerToolCallSchema(BaseModel):
+    """Schema for planner tool calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlannerResponseSchema(BaseModel):
+    """Schema for raw planner LLM response."""
+
+    model_config = ConfigDict(extra="allow")
+
+    plan_summary: str = Field(default="")
+    subtasks: list[PlannerSubtaskSchema] = Field(default_factory=list)
+    identified_risks: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    requires_clarification: bool = False
+    clarification_questions: list[str] = Field(default_factory=list)
+    tool_calls: list[PlannerToolCallSchema] = Field(default_factory=list)
 
 
 class PlannerAgent(BaseAgent[PlannerInput, PlannerOutput]):
@@ -46,6 +91,7 @@ class PlannerAgent(BaseAgent[PlannerInput, PlannerOutput]):
     
     @property
     def system_prompt(self) -> str:
+        tools_prompt = get_tools_system_prompt()
         return """You are a senior software architect and technical planner.
 
 Your role is to analyze tasks and create detailed implementation plans.
@@ -58,6 +104,24 @@ You do NOT write code - you only create plans.
 4. Identify target files that will likely be modified
 5. Order subtasks based on dependencies
 6. Identify risks and assumptions
+7. If needed, call tools to gather context or skills before finalizing the plan
+
+## Available Tools:
+You can call tools to inspect code, search context, run safe commands, and gather evidence before finalizing the plan.
+When uncertain, use tools first; do not guess.
+
+""" + tools_prompt + """
+
+## Tool Usage Rules:
+- Follow a two-pass planning approach: (1) gather evidence with minimal tools, (2) emit final executable plan.
+- Use tool calls iteratively until you have enough evidence.
+- Prefer lightweight reads/searches first, then targeted commands.
+- Include tool calls in `tool_calls` when additional context is required.
+- If all required context is already available, return `tool_calls: []`.
+- Ground your plan in repository evidence: map each major step to real files/folders.
+- If requested behavior does not match visible workspace context, state that mismatch explicitly in risks/assumptions.
+- Do not invent file paths; prefer discovered files from workspace context.
+- Prefer sectioned reasoning: separately consider architecture, files, constraints, and acceptance criteria.
 
 ## Output Format:
 You MUST respond with a valid JSON object in this exact format:
@@ -78,12 +142,16 @@ You MUST respond with a valid JSON object in this exact format:
     "identified_risks": ["Risk 1", "Risk 2"],
     "assumptions": ["Assumption 1", "Assumption 2"],
     "requires_clarification": false,
-    "clarification_questions": []
+    "clarification_questions": [],
+    "tool_calls": [
+        {"tool_name": "read_memory", "arguments": {}}
+    ]
 }
 ```
 
 ## Rules:
 - Maximum 10 subtasks
+- For simple, single-file edits (especially docs/readme wording changes), produce exactly 1 focused subtask.
 - Each subtask must have at least 1 acceptance criterion
 - If the task is unclear, set requires_clarification to true and list questions
 - Do not include code in your response
@@ -140,15 +208,39 @@ You MUST respond with a valid JSON object in this exact format:
             "",
         ]
         
+        # Inject memory if available
+        if context.memory_manager:
+            parts.append(context.memory_manager.get_all_context())
+            parts.append("")
+        
         # Add workspace context if available
         if input_data.workspace_context:
             parts.append("## Workspace Context:")
+            if "route_domain" in input_data.workspace_context:
+                parts.append(f"Task domain: {input_data.workspace_context['route_domain']}")
+            if "module_hints" in input_data.workspace_context and input_data.workspace_context["module_hints"]:
+                parts.append(
+                    "Module hints: " + ", ".join(input_data.workspace_context["module_hints"][:10])
+                )
+            if "relevant_files" in input_data.workspace_context and input_data.workspace_context["relevant_files"]:
+                parts.append("Most relevant files for this request:")
+                for f in input_data.workspace_context["relevant_files"][:30]:
+                    parts.append(f"  - {f}")
+                parts.append("")
+
             if "files" in input_data.workspace_context:
                 parts.append("Available files:")
-                for f in input_data.workspace_context["files"][:50]:  # Limit
+                for f in input_data.workspace_context["files"][:80]:
                     parts.append(f"  - {f}")
+            if "top_directories" in input_data.workspace_context and input_data.workspace_context["top_directories"]:
+                parts.append(
+                    f"Top-level directories/files: {', '.join(input_data.workspace_context['top_directories'])}"
+                )
             if "structure" in input_data.workspace_context:
                 parts.append(f"Project structure: {input_data.workspace_context['structure']}")
+            if "orchestration_context" in input_data.workspace_context:
+                parts.append("Orchestration context:")
+                parts.append(str(input_data.workspace_context["orchestration_context"]))
             parts.append("")
         
         # Add constraints
@@ -164,7 +256,9 @@ You MUST respond with a valid JSON object in this exact format:
             parts.append(input_data.previous_attempt)
             parts.append("")
         
-        parts.append("Please create a detailed plan for this task.")
+        parts.append(
+            "Please create a detailed plan for this task, explicitly connecting each subtask to files/folders from the workspace context."
+        )
         
         return "\n".join(parts)
     
@@ -176,53 +270,88 @@ You MUST respond with a valid JSON object in this exact format:
     ) -> PlannerOutput:
         """Parse LLM response into PlannerOutput."""
         try:
-            # Extract JSON from response
-            json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                # Try to find raw JSON
-                json_str = response.strip()
-                if not json_str.startswith("{"):
-                    # Try to extract anything that looks like JSON
-                    start = response.find("{")
-                    end = response.rfind("}") + 1
-                    if start != -1 and end > start:
-                        json_str = response[start:end]
-            
-            data = json.loads(json_str)
-            
-            # Parse subtasks
-            subtasks = []
-            for st in data.get("subtasks", []):
-                subtask = Subtask(
-                    id=str(st.get("id", len(subtasks) + 1)),
-                    title=st.get("title", "Untitled"),
-                    description=st.get("description", ""),
-                    acceptance_criteria=st.get("acceptance_criteria", ["Complete the task"]),
-                    target_files=st.get("target_files", []),
-                    dependencies=st.get("dependencies", []),
-                    estimated_complexity=st.get("estimated_complexity", "medium"),
-                )
-                subtasks.append(subtask)
-            
-            # Limit subtasks to max
+            data = parse_json_object(response)
+            if not isinstance(data, dict):
+                raise TypeError("Planner response root must be a JSON object")
+
+            schema = PlannerResponseSchema.model_validate(data)
+
+            # Normalize + cap
             max_subtasks = context.config.limits.tasks.max_subtasks
-            if len(subtasks) > max_subtasks:
-                subtasks = subtasks[:max_subtasks]
-            
+            normalized_subtasks = list(schema.subtasks)[:max_subtasks]
+
+            # Validate and normalize tool calls
+            tool_calls: list[ToolCall] = []
+            invalid_tools: list[str] = []
+            for tc in schema.tool_calls:
+                normalized_name = tc.tool_name.strip()
+                if not self._is_valid_tool_call(normalized_name):
+                    invalid_tools.append(normalized_name)
+                    continue
+                tool_calls.append(ToolCall(tool_name=normalized_name, arguments=tc.arguments))
+
+            if invalid_tools and context.telemetry:
+                context.telemetry.record_warning(
+                    "planner_invalid_tool_calls",
+                    context={"invalid": invalid_tools[:10]},
+                )
+
+            subtasks = [
+                Subtask(
+                    id=str(st.id),
+                    title=st.title,
+                    description=st.description,
+                    acceptance_criteria=list(st.acceptance_criteria),
+                    target_files=[str(path) for path in st.target_files if str(path).strip()],
+                    dependencies=list(st.dependencies),
+                    estimated_complexity=st.estimated_complexity,
+                )
+                for st in normalized_subtasks
+            ]
+
+            # Plan validation pass
+            plan_errors = self._validate_plan_semantics(
+                subtasks=subtasks,
+                tool_calls=tool_calls,
+                requires_clarification=schema.requires_clarification,
+            )
+            if plan_errors:
+                raise TypeError("; ".join(plan_errors))
+
+            confidence = self._score_plan_confidence(
+                subtasks=subtasks,
+                tool_calls=tool_calls,
+                workspace_context=input_data.workspace_context,
+                requires_clarification=schema.requires_clarification,
+            )
+            confidence_note = f"Planner confidence: {confidence:.2f}"
+            assumptions = list(schema.assumptions)
+            assumptions.append(confidence_note)
+
+            if context.telemetry:
+                context.telemetry.record_warning(
+                    "planner_plan_validated",
+                    context={
+                        "subtasks": len(subtasks),
+                        "tool_calls": len(tool_calls),
+                        "requires_clarification": schema.requires_clarification,
+                        "confidence": round(confidence, 3),
+                    },
+                )
+
             return PlannerOutput(
                 task_id=input_data.task_id,
                 status=AgentStatus.SUCCESS,
-                plan_summary=data.get("plan_summary", ""),
+                plan_summary=schema.plan_summary,
                 subtasks=subtasks,
-                identified_risks=data.get("identified_risks", []),
-                assumptions=data.get("assumptions", []),
-                requires_clarification=data.get("requires_clarification", False),
-                clarification_questions=data.get("clarification_questions", []),
+                identified_risks=list(schema.identified_risks),
+                assumptions=assumptions,
+                requires_clarification=schema.requires_clarification,
+                clarification_questions=list(schema.clarification_questions),
+                tool_calls=tool_calls,
             )
             
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
             # Return with parsing error
             return PlannerOutput(
                 task_id=input_data.task_id,
@@ -246,3 +375,69 @@ You MUST respond with a valid JSON object in this exact format:
             error=error,
             execution_time_ms=(time.perf_counter() - start_time) * 1000,
         )
+
+    @staticmethod
+    def _is_valid_tool_call(tool_name: str) -> bool:
+        """Validate that requested tool exists in the exposed planner tool catalog."""
+        if not tool_name:
+            return False
+        if tool_name in ALLOWED_TOOL_NAMES:
+            return True
+        # Keep MCP wildcard compatibility when server tool names are surfaced dynamically.
+        return tool_name.startswith("mcp_")
+
+    @staticmethod
+    def _validate_plan_semantics(
+        subtasks: list[Subtask],
+        tool_calls: list[ToolCall],
+        requires_clarification: bool,
+    ) -> list[str]:
+        """Semantic validation pass after schema parsing."""
+        errors: list[str] = []
+
+        if not subtasks and not tool_calls and not requires_clarification:
+            errors.append("Planner returned no subtasks, no tool calls, and no clarification request")
+
+        seen_ids: set[str] = set()
+        for st in subtasks:
+            sid = st.id.strip()
+            if sid in seen_ids:
+                errors.append(f"Duplicate subtask id: {sid}")
+            seen_ids.add(sid)
+
+            if not st.acceptance_criteria:
+                errors.append(f"Subtask {sid} missing acceptance criteria")
+
+            complexity = st.estimated_complexity.lower().strip()
+            if complexity not in {"low", "medium", "high"}:
+                errors.append(f"Subtask {sid} has invalid complexity: {st.estimated_complexity}")
+
+        return errors
+
+    @staticmethod
+    def _score_plan_confidence(
+        subtasks: list[Subtask],
+        tool_calls: list[ToolCall],
+        workspace_context: dict[str, Any],
+        requires_clarification: bool,
+    ) -> float:
+        """Compute lightweight confidence score for plan quality and evidence fit."""
+        if requires_clarification:
+            return 0.25
+
+        score = 0.35
+        if subtasks:
+            score += min(0.35, len(subtasks) * 0.08)
+
+        target_count = sum(len(st.target_files) for st in subtasks)
+        if target_count:
+            score += min(0.20, target_count * 0.04)
+
+        if tool_calls:
+            score += min(0.10, len(tool_calls) * 0.03)
+
+        relevant = workspace_context.get("relevant_files", []) if isinstance(workspace_context, dict) else []
+        if isinstance(relevant, list) and relevant:
+            score += 0.05
+
+        return max(0.0, min(1.0, score))

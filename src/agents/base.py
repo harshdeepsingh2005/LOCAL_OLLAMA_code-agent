@@ -14,6 +14,7 @@ Design Decisions:
 from __future__ import annotations
 
 import time
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -21,12 +22,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import AgentPolicy, Configuration
 from src.core.context_manager import ContextManager
 from src.core.llm_client import CompletionRequest, CompletionResponse, LLMClient, Message
 from src.core.telemetry import TelemetryCollector
+from src.core.memory import MemoryManager
 
 
 # =============================================================================
@@ -60,8 +62,15 @@ class AgentInput(BaseModel):
     task_id: str = Field(..., description="Unique task identifier")
     run_id: str = Field(..., description="Run identifier for tracking")
     
-    class Config:
-        extra = "forbid"  # No extra fields allowed
+    model_config = ConfigDict(extra="forbid")  # No extra fields allowed
+
+
+class ToolCall(BaseModel):
+    """A tool or skill call to be executed by the orchestrator."""
+    tool_name: str = Field(..., description="Name of the tool/skill to call")
+    arguments: dict[str, Any] = Field(default_factory=dict, description="Arguments for the tool")
+    
+    model_config = ConfigDict(extra="allow")
 
 
 class AgentOutput(BaseModel):
@@ -80,8 +89,10 @@ class AgentOutput(BaseModel):
     error: str | None = None
     error_context: dict[str, Any] = Field(default_factory=dict)
     
-    class Config:
-        extra = "forbid"
+    # Tools
+    tool_calls: list[ToolCall] = Field(default_factory=list, description="Optional tools to run")
+    
+    model_config = ConfigDict(extra="forbid")
 
 
 # =============================================================================
@@ -128,8 +139,7 @@ class Subtask(BaseModel):
         description="low, medium, or high"
     )
     
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class PlannerOutput(AgentOutput):
@@ -180,13 +190,20 @@ class CodeChange(BaseModel):
     
     # Diff information
     diff: str | None = Field(None, description="Unified diff format")
+    hunks: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Optional patch hunks for surgical edits. "
+            "Each hunk supports start_line, end_line, original_content, new_content, "
+            "context_before, context_after."
+        ),
+    )
     
     # Metadata
     lines_added: int = 0
     lines_removed: int = 0
     
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class CoderOutput(AgentOutput):
@@ -230,8 +247,7 @@ class ReviewIssue(BaseModel):
     description: str = Field(..., description="What the issue is")
     suggestion: str = Field("", description="How to fix it")
     
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ReviewVerdict(str, Enum):
@@ -323,6 +339,7 @@ class AgentContext:
     llm_client: LLMClient
     context_manager: ContextManager
     telemetry: TelemetryCollector | None = None
+    memory_manager: MemoryManager | None = None
     
     # Execution constraints (from policy)
     max_tokens: int = 8000
@@ -483,9 +500,9 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
         
         sanitized = text
         for pattern in context.config.policies.safety.prompt_injection.block_patterns:
-            if pattern.lower() in sanitized.lower():
-                # Replace with safe placeholder
-                sanitized = sanitized.replace(pattern, "[BLOCKED]")
+            if pattern and re.search(re.escape(pattern), sanitized, flags=re.IGNORECASE):
+                # Case-insensitive replacement with consistent marker.
+                sanitized = re.sub(re.escape(pattern), "[BLOCKED]", sanitized, flags=re.IGNORECASE)
         
         return sanitized
     
@@ -528,32 +545,94 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
                     start_time,
                 )
             
-            # Execute implementation
-            output = self._execute_impl(input_data, context)
-            
-            # Validate output
-            output_errors = self._validate_output(output, context)
-            if output_errors:
-                return self._create_error_output(
-                    input_data,
-                    context,
-                    AgentStatus.REJECTED,
-                    f"Output validation failed: {'; '.join(output_errors)}",
-                    start_time,
-                )
-            
+            max_attempts = max(1, int(context.max_retries) + 1)
+            last_output: OutputT | None = None
+
+            for attempt in range(max_attempts):
+                if context.elapsed_seconds > context.timeout_seconds:
+                    if context.telemetry:
+                        context.telemetry.record_warning(
+                            "agent_timeout",
+                            context={
+                                "agent": self.agent_type.value,
+                                "attempt": attempt,
+                                "elapsed_seconds": round(context.elapsed_seconds, 3),
+                                "timeout_seconds": context.timeout_seconds,
+                            },
+                        )
+                    return self._create_error_output(
+                        input_data,
+                        context,
+                        AgentStatus.TIMEOUT,
+                        f"Agent timeout exceeded ({context.timeout_seconds}s)",
+                        start_time,
+                    )
+
+                # Execute implementation
+                output = self._execute_impl(input_data, context)
+
+                # Validate output
+                output_errors = self._validate_output(output, context)
+                if output_errors:
+                    output = self._create_error_output(
+                        input_data,
+                        context,
+                        AgentStatus.REJECTED,
+                        f"Output validation failed: {'; '.join(output_errors)}",
+                        start_time,
+                    )
+
+                if context.elapsed_seconds > context.timeout_seconds:
+                    if context.telemetry:
+                        context.telemetry.record_warning(
+                            "agent_timeout",
+                            context={
+                                "agent": self.agent_type.value,
+                                "attempt": attempt,
+                                "elapsed_seconds": round(context.elapsed_seconds, 3),
+                                "timeout_seconds": context.timeout_seconds,
+                            },
+                        )
+                    return self._create_error_output(
+                        input_data,
+                        context,
+                        AgentStatus.TIMEOUT,
+                        f"Agent timeout exceeded ({context.timeout_seconds}s)",
+                        start_time,
+                    )
+
+                output.retries = attempt
+                last_output = output
+
+                if output.status == AgentStatus.SUCCESS:
+                    break
+
+                if attempt < max_attempts - 1 and context.telemetry:
+                    context.telemetry.record_warning(
+                        "agent_retry",
+                        context={
+                            "agent": self.agent_type.value,
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "status": output.status.value,
+                            "error": output.error,
+                        },
+                    )
+
+            assert last_output is not None
+
             # Update execution time
-            output.execution_time_ms = (time.perf_counter() - start_time) * 1000
-            
-            # Record success in telemetry
+            last_output.execution_time_ms = (time.perf_counter() - start_time) * 1000
+
+            # Record completion in telemetry
             if context.telemetry:
                 context.telemetry.record_agent_end(
                     agent_id=self.agent_type.value,
-                    success=output.status == AgentStatus.SUCCESS,
-                    output_summary=str(output.model_dump())[:500],
+                    success=last_output.status == AgentStatus.SUCCESS,
+                    output_summary=str(last_output.model_dump())[:500],
                 )
-            
-            return output
+
+            return last_output
             
         except Exception as e:
             # Record error
@@ -609,16 +688,38 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
         Returns:
             LLM completion response
         """
+        if context.elapsed_seconds > context.timeout_seconds:
+            raise TimeoutError(f"Agent timeout exceeded ({context.timeout_seconds}s)")
+
         # Build messages
         messages = [
             Message(role="system", content=self.system_prompt),
             Message(role="user", content=user_message),
         ]
+
+        # Token management: cap generation by available budget after prompt size.
+        prompt_text = f"{self.system_prompt}\n\n{user_message}"
+        prompt_tokens = context.context_manager.count_tokens(prompt_text)
+        requested_max = max_tokens if max_tokens is not None else context.max_tokens
+        available_for_completion = max(64, int(context.max_tokens) - int(prompt_tokens))
+        effective_max_tokens = max(1, min(int(requested_max), available_for_completion))
+
+        if context.telemetry and effective_max_tokens < int(requested_max):
+            context.telemetry.record_warning(
+                "agent_token_budget_adjusted",
+                context={
+                    "agent": self.agent_type.value,
+                    "requested_max_tokens": int(requested_max),
+                    "effective_max_tokens": effective_max_tokens,
+                    "prompt_tokens": int(prompt_tokens),
+                    "context_max_tokens": int(context.max_tokens),
+                },
+            )
         
         # Create request
         request = CompletionRequest(
             messages=messages,
-            max_tokens=max_tokens or context.max_tokens,
+            max_tokens=effective_max_tokens,
         )
         
         # Make call
