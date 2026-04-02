@@ -514,6 +514,40 @@ class Executor:
             "success": success,
         }
         self._telemetry.record_warning("cycle_snapshot", context=snapshot)
+
+    def _record_failure_learning(self, task_description: str, error_message: str) -> None:
+        """Persist normalized failure learning signal."""
+        if not self._memory_manager:
+            return
+        try:
+            self._memory_manager.record_failure_pattern(
+                task_description=task_description,
+                error_message=error_message,
+            )
+        except Exception:
+            # Learning must never block execution path
+            pass
+
+    def _record_success_learning(self, task_description: str, changes: list[CodeChange]) -> None:
+        """Extract and persist reusable success patterns from approved changes."""
+        if not self._memory_manager or not changes:
+            return
+        try:
+            serialized = [
+                {
+                    "file_path": c.file_path,
+                    "change_type": c.change_type,
+                    "description": c.description,
+                    "new_content": c.new_content,
+                }
+                for c in changes
+            ]
+            self._memory_manager.record_success_patterns_from_changes(
+                changes=serialized,
+                task_description=task_description,
+            )
+        except Exception:
+            pass
     
     def execute(
         self,
@@ -578,6 +612,7 @@ class Executor:
                 # Iteration limit reached during planning
                 result.needs_continuation = True
                 result.error = "Max iterations reached during planning"
+                self._record_failure_learning(task_description, result.error)
                 return result
             if plan.status != AgentStatus.SUCCESS or not plan.subtasks:
                 self._loop.complete_failure(
@@ -585,6 +620,7 @@ class Executor:
                     f"Planning failed: {plan.error or 'No subtasks generated'}"
                 )
                 result.error = plan.error
+                self._record_failure_learning(task_description, result.error or "No subtasks generated")
                 return result
             
             # Create task graph
@@ -640,6 +676,10 @@ class Executor:
                     TerminationReason.UNRECOVERABLE_FAILURE,
                     f"{stats.failed} tasks failed, {stats.blocked} blocked"
                 )
+                self._record_failure_learning(
+                    task_description,
+                    f"{stats.failed} tasks failed, {stats.blocked} blocked",
+                )
             
         except Exception as e:
             self._loop.complete_failure(
@@ -648,6 +688,7 @@ class Executor:
             )
             result.error = str(e)
             self._telemetry.record_error(str(e))
+            self._record_failure_learning(task_description, str(e))
         
         finally:
             # Finalize result
@@ -675,6 +716,12 @@ class Executor:
                 success=result.success,
                 summary=f"Completed {result.subtasks_completed}/{result.subtasks_total} tasks"
             )
+            if self._memory_manager:
+                self._memory_manager.record_task_outcome(
+                    task_description=task_description,
+                    success=result.success,
+                    error=result.error,
+                )
             
             # Cleanup - DON'T close LLM client if we might continue
             if self._llm_client and not result.needs_continuation:
@@ -895,9 +942,11 @@ class Executor:
             if plan is None:
                 result.needs_continuation = True
                 result.error = "Max iterations reached during planning"
+                self._record_failure_learning(task_description, result.error)
                 return result
             if plan.status != AgentStatus.SUCCESS or not plan.subtasks:
                 result.error = plan.error or "No subtasks generated"
+                self._record_failure_learning(task_description, result.error)
                 return result
             
             # Create or extend task graph
@@ -946,6 +995,7 @@ class Executor:
         except Exception as e:
             result.error = str(e)
             self._telemetry.record_error(str(e))
+            self._record_failure_learning(task_description, str(e))
         
         finally:
             result.completed_at = datetime.now(timezone.utc)
@@ -963,6 +1013,12 @@ class Executor:
                 )
             
             # Don't close LLM - keep session alive for next task
+            if self._memory_manager:
+                self._memory_manager.record_task_outcome(
+                    task_description=task_description,
+                    success=result.success,
+                    error=result.error,
+                )
         
         return result
     
@@ -1123,6 +1179,7 @@ class Executor:
             return None
         if coder_output.status != AgentStatus.SUCCESS:
             task_node.mark_failed(coder_output.error or "Coding failed")
+            self._record_failure_learning(task_node.subtask.description, coder_output.error or "Coding failed")
             return False
         
         # Review-fix loop
@@ -1159,6 +1216,7 @@ class Executor:
             
             if reviewer_output.status != AgentStatus.SUCCESS:
                 task_node.mark_failed(reviewer_output.error or "Review failed")
+                self._record_failure_learning(task_node.subtask.description, reviewer_output.error or "Review failed")
                 return False
             
             # ============================================================
@@ -1187,6 +1245,10 @@ class Executor:
                         success=False,
                         reviewer_output=reviewer_output,
                     )
+                    self._record_failure_learning(
+                        task_node.subtask.description,
+                        "Verification gate failed: no_errors/tests_passed/risk_recorded",
+                    )
                     return False
 
                 if self._telemetry:
@@ -1203,6 +1265,7 @@ class Executor:
                         "changes": len(current_changes),
                         "verdict": reviewer_output.verdict.value,
                     })
+                    self._record_success_learning(task_node.subtask.description, current_changes)
                     self._record_cycle_snapshot(
                         task_id=task_node.id,
                         task_description=task_node.subtask.description,
@@ -1214,6 +1277,10 @@ class Executor:
                     return True
                 else:
                     task_node.mark_failed("Failed to apply approved changes")
+                    self._record_failure_learning(
+                        task_node.subtask.description,
+                        "Failed to apply approved changes",
+                    )
                     self._record_cycle_snapshot(
                         task_id=task_node.id,
                         task_description=task_node.subtask.description,
@@ -1231,12 +1298,17 @@ class Executor:
                 task_node.mark_failed(
                     f"Changes rejected by reviewer: {reviewer_output.summary}"
                 )
+                self._record_failure_learning(
+                    task_node.subtask.description,
+                    f"Changes rejected by reviewer: {reviewer_output.summary}",
+                )
                 return False
             
             # REQUEST_CHANGES: Invoke fixer to address issues
             # This is the ONLY path that continues the loop
             if not self._loop.can_fix_again():
                 task_node.mark_failed("Max fix iterations exceeded")
+                self._record_failure_learning(task_node.subtask.description, "Max fix iterations exceeded")
                 return False
             
             # Fix phase - address reviewer's issues
@@ -1252,6 +1324,7 @@ class Executor:
             
             if fixer_output.status != AgentStatus.SUCCESS:
                 task_node.mark_failed(fixer_output.error or "Fix failed")
+                self._record_failure_learning(task_node.subtask.description, fixer_output.error or "Fix failed")
                 return False
             
             # Use fixed changes for next review iteration
@@ -1263,6 +1336,7 @@ class Executor:
             return None
         
         task_node.mark_failed("Execution interrupted")
+        self._record_failure_learning(task_node.subtask.description, "Execution interrupted")
         return False
     
     def _execute_coder(

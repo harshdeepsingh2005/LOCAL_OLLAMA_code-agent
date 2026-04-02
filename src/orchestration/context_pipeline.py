@@ -46,6 +46,7 @@ class ContextPacket:
     evergreen_context: str = ""
     documentation_context: str = ""
     retrieved_code_context: str = ""
+    learned_patterns_context: str = ""
     route_summary: str = ""
     constraints: list[str] = field(default_factory=list)
 
@@ -59,6 +60,8 @@ class ContextPacket:
             sections.append("## Evergreen Context\n" + self.evergreen_context)
         if self.documentation_context:
             sections.append("## Documentation\n" + self.documentation_context)
+        if self.learned_patterns_context:
+            sections.append(self.learned_patterns_context)
         if self.retrieved_code_context:
             sections.append("## Retrieved Code\n" + self.retrieved_code_context)
         if self.constraints:
@@ -170,6 +173,7 @@ class ContextBuilder:
         """Assemble a task-specific context packet."""
         docs = self._load_docs_context(max_chars=2000)
         retrieved = self._retrieve_code(task_description, route.module_hints)
+        learned = self._memory.format_learned_patterns(task_description, max_chars=1500)
 
         route_summary = (
             f"domain={route.domain.value}; module_hints={route.module_hints or ['none']}"
@@ -179,6 +183,7 @@ class ContextBuilder:
             evergreen_context=self._memory.get_all_context(),
             documentation_context=docs,
             retrieved_code_context=retrieved,
+            learned_patterns_context=learned,
             route_summary=route_summary,
             constraints=list(route.constraints),
         )
@@ -230,7 +235,8 @@ class ContextBuilder:
             self._root / "core_context.md",
             self._root / "docs" / "agent-evergreen-context.md",
             self._root / "docs" / "architecture.md",
-            self._root / "docs" / "agent-contracts.md",
+            self._root / "docs" / "agent_contracts.md",
+            self._root / "docs" / "execution_flow.md",
         ]
 
         sections: list[str] = []

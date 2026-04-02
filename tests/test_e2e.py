@@ -373,6 +373,82 @@ class TestToolMemoryOrchestrationIntegration:
         assert executor._task_router is not None
         assert executor._validation_layer is not None
 
+    def test_memory_learning_normalizes_error_category(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        memory.record_failure_pattern(
+            task_description="Add API endpoint",
+            error_message="ImportError: cannot import name APIRouter",
+        )
+
+        data = memory._load_memory(memory._project_memory_file)
+        assert data["failure_patterns"]
+        assert data["failure_patterns"][0]["category"] == "missing_import"
+
+    def test_memory_learning_deduplicates_similar_failures(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        memory.record_failure_pattern(
+            task_description="Fix imports in service",
+            error_message="ImportError: module missing in service",
+        )
+        memory.record_failure_pattern(
+            task_description="Fix imports in service module",
+            error_message="ImportError: missing module in service",
+        )
+
+        data = memory._load_memory(memory._project_memory_file)
+        patterns = data["failure_patterns"]
+        assert len(patterns) == 1
+        assert patterns[0]["frequency"] >= 2
+
+    def test_memory_learning_ranked_split_retrieval(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        memory.record_failure_pattern(
+            task_description="Fix import in api router",
+            error_message="ImportError: APIRouter missing",
+        )
+        memory.record_success_patterns_from_changes(
+            changes=[
+                {
+                    "file_path": "src/routes/api.py",
+                    "change_type": "modify",
+                    "description": "add login route",
+                    "new_content": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.post('/login')\ndef login():\n    return {}\n",
+                }
+            ],
+            task_description="Add fastapi login endpoint",
+        )
+
+        retrieved = memory.retrieve_relevant_patterns("Add fastapi router endpoint with imports")
+        assert "failures" in retrieved and "successes" in retrieved
+        assert len(retrieved["failures"]) >= 1
+        assert len(retrieved["successes"]) >= 1
+
+    def test_memory_learning_structured_injection_budget(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.orchestration.context_pipeline import ContextBuilder, TaskRoute, TaskDomain
+
+        memory = MemoryManager(workspace)
+        for i in range(20):
+            memory.record_failure_pattern(
+                task_description=f"Fix import issue {i}",
+                error_message="ImportError: missing module path",
+            )
+
+        block = memory.format_learned_patterns("Fix import issues in api", max_chars=300)
+        assert len(block) <= 300
+        assert "Learned Patterns" in block
+
+        builder = ContextBuilder(workspace_root=workspace, memory_manager=memory)
+        packet = builder.build("Fix import issues in api", TaskRoute(domain=TaskDomain.BACKEND))
+        prompt = packet.to_prompt_context(max_chars=1200)
+        assert "Learned Patterns" in prompt
+
     def test_planning_tool_calls_execute_before_final_plan(self, workspace):
         """Planner tool calls should be executed and planning should continue to subtasks."""
         from src.orchestration.executor import Executor
