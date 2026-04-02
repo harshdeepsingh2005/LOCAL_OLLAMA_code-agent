@@ -352,7 +352,13 @@ class ToolExecutor:
             return f"Error: Policy blocked tool '{call.tool_name}': {policy_error}"
 
         try:
-            return str(plugin.execute(args))
+            result = plugin.execute(args)
+            if not isinstance(result, str):
+                return (
+                    f"Error: contract_violation for tool '{call.tool_name}': "
+                    "plugin execute() must return a string"
+                )
+            return result
         except KeyError as e:
             return f"Error: Missing required argument {e} for tool '{call.tool_name}'."
         except Exception as e:

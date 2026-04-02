@@ -52,6 +52,25 @@ class TaskNode(BaseModel):
     result: dict[str, Any] = Field(default_factory=dict)
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    _ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
+        TaskStatus.PENDING: {TaskStatus.READY, TaskStatus.RUNNING, TaskStatus.SKIPPED, TaskStatus.BLOCKED},
+        TaskStatus.READY: {TaskStatus.RUNNING, TaskStatus.SKIPPED, TaskStatus.BLOCKED},
+        TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED},
+        TaskStatus.COMPLETED: set(),
+        TaskStatus.FAILED: set(),
+        TaskStatus.SKIPPED: set(),
+        TaskStatus.BLOCKED: set(),
+    }
+
+    def _transition_to(self, next_status: TaskStatus) -> None:
+        """Validate and apply deterministic state transition."""
+        allowed = self._ALLOWED_TRANSITIONS.get(self.status, set())
+        if next_status not in allowed:
+            raise InvalidTaskTransitionError(
+                f"Invalid task transition: {self.status.value} -> {next_status.value} for task {self.id}"
+            )
+        self.status = next_status
     
     def is_ready(self, graph: "TaskGraph") -> bool:
         """Check if all dependencies are satisfied."""
@@ -63,12 +82,16 @@ class TaskNode(BaseModel):
     
     def mark_running(self) -> None:
         """Mark task as running."""
-        self.status = TaskStatus.RUNNING
+        self._transition_to(TaskStatus.RUNNING)
         self.started_at = datetime.now(timezone.utc)
+
+    def mark_ready(self) -> None:
+        """Mark task as ready after dependency validation."""
+        self._transition_to(TaskStatus.READY)
     
     def mark_completed(self, result: dict[str, Any] | None = None) -> None:
         """Mark task as completed."""
-        self.status = TaskStatus.COMPLETED
+        self._transition_to(TaskStatus.COMPLETED)
         self.completed_at = datetime.now(timezone.utc)
         if self.started_at:
             self.execution_time_ms = (
@@ -79,7 +102,7 @@ class TaskNode(BaseModel):
     
     def mark_failed(self, error: str) -> None:
         """Mark task as failed."""
-        self.status = TaskStatus.FAILED
+        self._transition_to(TaskStatus.FAILED)
         self.completed_at = datetime.now(timezone.utc)
         self.error = error
         if self.started_at:
@@ -89,12 +112,12 @@ class TaskNode(BaseModel):
     
     def mark_skipped(self, reason: str) -> None:
         """Mark task as skipped."""
-        self.status = TaskStatus.SKIPPED
+        self._transition_to(TaskStatus.SKIPPED)
         self.error = reason
     
     def mark_blocked(self, reason: str) -> None:
         """Mark task as blocked due to dependency failure."""
-        self.status = TaskStatus.BLOCKED
+        self._transition_to(TaskStatus.BLOCKED)
         self.error = reason
 
 
@@ -135,6 +158,10 @@ class CycleDetectedError(Exception):
 class TaskNotFoundError(Exception):
     """Raised when a task is not found in the graph."""
     pass
+
+
+class InvalidTaskTransitionError(ValueError):
+    """Raised when a task transition violates graph invariants."""
 
 
 class TaskGraph:
@@ -227,7 +254,7 @@ class TaskGraph:
         ready = []
         for node in self._nodes.values():
             if node.status == TaskStatus.PENDING and node.is_ready(self):
-                node.status = TaskStatus.READY
+                node.mark_ready()
                 ready.append(node)
             elif node.status == TaskStatus.READY:
                 ready.append(node)

@@ -435,6 +435,36 @@ class TestPhase5PolicyProfiles:
         assert executor._llm_client._default_config.temperature == 0.0
         assert executor._llm_client._default_config.top_p == 1.0
 
+
+class TestPhase5FormalGuarantees:
+    """Phase 5.3 invariants and failure normalization checks."""
+
+    def test_invalid_task_state_transition_is_caught(self, workspace):
+        from src.agents import Subtask
+        from src.orchestration.task_graph import InvalidTaskTransitionError, TaskNode
+
+        node = TaskNode(
+            id="inv-1",
+            subtask=Subtask(
+                id="inv-1",
+                title="Invariant",
+                description="Ensure transitions are guarded",
+                acceptance_criteria=["must guard invalid transition"],
+            ),
+        )
+
+        with pytest.raises(InvalidTaskTransitionError):
+            node.mark_completed({"ok": False})
+
+    def test_failure_classification_is_normalized(self, workspace):
+        from src.config import get_config
+        from src.orchestration.executor import Executor
+
+        executor = Executor(config=get_config(), workspace_root=workspace, log_dir=workspace / "logs")
+        assert executor._classify_failure("Planning failed due to malformed JSON") == "planning_error"
+        assert executor._classify_failure("Tool command blocked by policy") == "tool_error"
+        assert executor._classify_failure("contract violation on output schema") == "contract_violation"
+
     def test_executor_initialize_wires_memory_tools_and_context_pipeline(self, workspace):
         """Executor run initialization should wire memory manager, tools, and context builder."""
         from src.orchestration.executor import Executor

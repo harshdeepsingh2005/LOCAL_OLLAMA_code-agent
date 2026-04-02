@@ -131,6 +131,15 @@ class ExecutionError(Exception):
     pass
 
 
+class FailureType:
+    """Normalized failure categories for observability and learning."""
+
+    TOOL_ERROR = "tool_error"
+    CONTRACT_VIOLATION = "contract_violation"
+    PLANNING_ERROR = "planning_error"
+    EXECUTION_ERROR = "execution_error"
+
+
 class Executor:
     """
     Main execution engine for the agent system.
@@ -533,6 +542,18 @@ class Executor:
         }
         self._telemetry.record_warning("cycle_snapshot", context=snapshot)
 
+    @staticmethod
+    def _classify_failure(error_message: str) -> str:
+        """Classify failures into normalized categories."""
+        text = (error_message or "").lower()
+        if "planner" in text or "planning" in text:
+            return FailureType.PLANNING_ERROR
+        if "contract" in text or "schema" in text or "invariant" in text:
+            return FailureType.CONTRACT_VIOLATION
+        if "tool" in text or "mcp" in text or "command" in text:
+            return FailureType.TOOL_ERROR
+        return FailureType.EXECUTION_ERROR
+
     def _is_allowed_tool_name(self, tool_name: str) -> bool:
         """Return True when tool name is in the known allowlist or MCP namespace."""
         if not tool_name:
@@ -720,11 +741,20 @@ class Executor:
         """Persist normalized failure learning signal."""
         if not self._memory_manager:
             return
+        classified = f"{self._classify_failure(error_message)}: {error_message}"
         try:
             self._memory_manager.record_failure_pattern(
                 task_description=task_description,
-                error_message=error_message,
+                error_message=classified,
             )
+            if self._telemetry:
+                self._telemetry.record_warning(
+                    "failure_classified",
+                    context={
+                        "failure_type": self._classify_failure(error_message),
+                        "error": error_message[:240],
+                    },
+                )
         except Exception:
             # Learning must never block execution path
             pass
@@ -887,7 +917,7 @@ class Executor:
                 TerminationReason.FATAL_ERROR,
                 str(e)
             )
-            result.error = str(e)
+            result.error = f"{self._classify_failure(str(e))}: {e}"
             self._telemetry.record_error(str(e))
             self._record_failure_learning(task_description, str(e))
         
