@@ -42,6 +42,10 @@ class ReviewerIssueSchema(BaseModel):
     line_range: str | None = None
     description: str = Field(default="")
     suggestion: str = Field(default="")
+    issue_code: str = Field(default="")
+    acceptance_criterion_ref: str = Field(default="")
+    evidence: str = Field(default="")
+    blocking: bool | None = None
 
 
 class ReviewerResponseSchema(BaseModel):
@@ -96,7 +100,11 @@ You MUST respond with a valid JSON object in this exact format:
             "file_path": "path/to/file.py",
             "line_range": "10-15",
             "description": "What the issue is",
-            "suggestion": "How to fix it"
+            "suggestion": "How to fix it",
+            "issue_code": "REVIEW_001",
+            "acceptance_criterion_ref": "Criterion 1",
+            "evidence": "Function divide() does not handle zero divisor on lines 12-15",
+            "blocking": true
         }
     ],
     "strengths": ["What was done well"],
@@ -133,6 +141,9 @@ You MUST respond with a valid JSON object in this exact format:
 - Always cite specific line numbers when possible
 - Be specific about what needs to change
 - Explain WHY something is an issue
+- Every issue MUST include: issue_code, acceptance_criterion_ref, evidence, suggestion
+- Link each issue to at least one acceptance criterion from the subtask
+- Mark blocking=true for issues that prevent task completion
 - Do not write new code, only describe what should change
 - Check all acceptance criteria"""
     
@@ -254,6 +265,14 @@ You MUST respond with a valid JSON object in this exact format:
                     line_range=issue_data.line_range,
                     description=issue_data.description,
                     suggestion=issue_data.suggestion,
+                    issue_code=(issue_data.issue_code or "").strip() or "REVIEW_GENERIC",
+                    acceptance_criterion_ref=(issue_data.acceptance_criterion_ref or "").strip(),
+                    evidence=(issue_data.evidence or "").strip() or issue_data.description,
+                    blocking=(
+                        bool(issue_data.blocking)
+                        if issue_data.blocking is not None
+                        else issue_data.severity.lower() in {"critical", "major"}
+                    ),
                 )
                 issues.append(issue)
             
@@ -264,6 +283,11 @@ You MUST respond with a valid JSON object in this exact format:
 
             severities = [i.severity.lower() for i in issues]
             if any(sev in {"critical", "major"} for sev in severities):
+                task_complete = False
+                if verdict == ReviewVerdict.APPROVE:
+                    verdict = ReviewVerdict.REQUEST_CHANGES
+
+            if any(i.blocking for i in issues):
                 task_complete = False
                 if verdict == ReviewVerdict.APPROVE:
                     verdict = ReviewVerdict.REQUEST_CHANGES
