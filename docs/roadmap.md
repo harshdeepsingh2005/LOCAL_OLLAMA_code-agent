@@ -81,6 +81,20 @@ Expected outcomes:
 - broader deployment suitability,
 - cleaner extensibility model.
 
+Status:
+
+- ✅ plugin-style tool architecture implemented,
+- ✅ policy profiles (`strict` / `balanced` / `permissive`) implemented,
+- ✅ stronger formal guarantees (task-state invariants + failure normalization) implemented,
+- ✅ multi-workspace orchestration v1 (sequential, isolated contexts) implemented.
+
+## Version 2 completion notes
+
+- Tool execution now uses explicit plugin registry lookup.
+- MCP execution is explicit (`mcp_list_tools` / `mcp_call`), no implicit catch-all path.
+- Strict profile enforces deterministic LLM settings (`temperature=0.0`, bounded tool execution).
+- Context pipeline and memory-learning upgrades are integrated into default orchestration.
+
 ## Milestone metrics
 
 Track progress by:

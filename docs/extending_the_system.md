@@ -23,11 +23,19 @@ Preferred order of work:
 
 ## Add a new tool
 
-1. Implement adapter in `src/tools` with a clear input/output contract.
-2. Register dispatch mapping in `src/core/agent_tools.py`.
-3. Apply safety checks (paths/timeouts/input validation).
-4. Emit telemetry for success and failure.
-5. Add integration/e2e tests.
+1. Implement a plugin that conforms to `ToolPlugin` in `src/tools/base.py`.
+2. Register it in `ToolRegistry` via `ToolExecutor` setup.
+3. Ensure deterministic `validate(args)` and `policy_check(context, args)` behavior.
+4. Emit telemetry for success/failure and policy blocks.
+5. Add integration/e2e tests for registered and unregistered behavior.
+
+### Plugin checklist (Phase 5)
+
+- define `name`, `version`, and `capabilities`,
+- reject malformed args in `validate`,
+- enforce policy in `policy_check`,
+- never bypass registry lookup,
+- return string outputs compatible with tool-call contracts.
 
 ## Add or evolve agent behavior
 
@@ -52,6 +60,43 @@ When changing `Executor` or `LoopController`:
 2. Add defaults in YAML.
 3. Validate at startup.
 4. Add tests for default and override behavior.
+
+## Policy profiles (strict / balanced / permissive)
+
+Policy profile logic now lives in `src/core/policy/profiles.py`.
+
+- `strict`: deterministic-first, read-oriented tool surface, `temperature=0.0`.
+- `balanced`: default profile with bounded flexibility.
+- `permissive`: widest tool surface and looser generation settings.
+
+When extending behavior:
+
+1. update profile constraints first,
+2. enforce profile in tool execution and planner/coder tool-step validation,
+3. test blocked + allowed paths for each relevant profile.
+
+## Formal guarantees and invariants
+
+The runtime now includes explicit invariant checks:
+
+- task state transitions are validated (`pending/ready -> running -> completed|failed`),
+- invalid transitions raise explicit errors,
+- failure categories are normalized (`tool_error`, `contract_violation`, `planning_error`, `execution_error`),
+- tool plugins must satisfy output postconditions.
+
+When adding orchestration logic, preserve these invariants and add tests for invalid transitions.
+
+## Multi-workspace orchestration (v1)
+
+`WorkspaceManager` (`src/orchestration/workspace_manager.py`) provides:
+
+- isolated per-workspace memory/context,
+- deterministic workspace ordering,
+- sequential execution only (no parallel workspace execution in v1).
+
+CLI support includes workspace list/add/clear controls, and sequential task execution when multiple workspaces are configured.
+
+Extension rule: do not allow context leakage between workspaces.
 
 ## Deep extension examples
 

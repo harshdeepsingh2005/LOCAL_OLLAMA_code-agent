@@ -43,6 +43,8 @@ class CommandHandler:
         "/clear": "Clear conversation context",
         "/checkpoints": "List available checkpoints",
         "/project": "Enable/disable project mode [on|off]",
+        "/profile": "Get/set policy profile [strict|balanced|permissive]",
+        "/workspaces": "Manage multi-workspace list [list|add|clear]",
     }
     
     def __init__(
@@ -124,6 +126,8 @@ class CommandHandler:
             "/clear": self._cmd_clear,
             "/checkpoints": self._cmd_checkpoints,
             "/project": self._cmd_project,
+            "/profile": self._cmd_profile,
+            "/workspaces": self._cmd_workspaces,
         }
         
         handler = handlers.get(command)
@@ -562,8 +566,54 @@ class CommandHandler:
         else:
             self.display.error(f"Invalid argument: {mode}")
             self.display.info("Usage: /project [on|off]")
+
+    def _cmd_profile(self, args: list[str]) -> None:
+        """Get or set active policy profile."""
+        if not hasattr(self, "_app_callback"):
+            self.display.error("Profile control not available in this context")
+            return
+
+        if not args:
+            profile = self._app_callback("get_policy_profile")
+            self.display.info(f"[Policy Profile] {profile}")
+            return
+
+        profile = args[0].lower().strip()
+        if profile not in {"strict", "balanced", "permissive"}:
+            self.display.error(f"Invalid profile: {profile}")
+            self.display.info("Usage: /profile [strict|balanced|permissive]")
+            return
+
+        self._app_callback("set_policy_profile", profile)
+
+    def _cmd_workspaces(self, args: list[str]) -> None:
+        """Manage deterministic multi-workspace configuration."""
+        if not hasattr(self, "_app_callback"):
+            self.display.error("Workspace control not available in this context")
+            return
+
+        action = args[0].lower() if args else "list"
+        if action == "list":
+            workspaces = self._app_callback("get_workspaces")
+            self.display.subheader("Configured Workspaces")
+            for item in workspaces:
+                self.display.raw(f"  - {item}")
+            return
+
+        if action == "add":
+            if len(args) < 2:
+                self.display.info("Usage: /workspaces add <path>")
+                return
+            self._app_callback("add_workspace", args[1])
+            return
+
+        if action == "clear":
+            self._app_callback("clear_workspaces")
+            return
+
+        self.display.info("Usage: /workspaces [list|add <path>|clear]")
     
-    def set_app_callback(self, callback: Callable[[str], Any]) -> None:
+    def set_app_callback(self, callback: Callable[..., Any]) -> None:
         """Set callback to app instance for project mode commands."""
         self._app_callback = callback
 

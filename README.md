@@ -20,6 +20,10 @@ The objective is practical autonomy with clear operational guardrails.
 - Persistent run telemetry, checkpoints, and rollback support
 - Controlled tool execution (filesystem, shell, testing, memory, MCP)
 - Session-aware CLI with continuation support after bounded pauses
+- Plugin-style tool registry with explicit tool registration
+- Policy profiles: `strict`, `balanced`, `permissive`
+- Formal execution guarantees (state invariants + normalized failures)
+- Deterministic sequential multi-workspace orchestration (v1)
 
 ## Repository structure
 
@@ -49,6 +53,18 @@ The project expects Ollama (or configured equivalent) to be reachable from the c
 
 `agent`
 
+### Policy profiles
+
+- `agent --policy-profile strict` (deterministic-first, read-oriented)
+- `agent --policy-profile balanced` (default)
+- `agent --policy-profile permissive` (widest tool surface)
+
+Interactive commands:
+
+- `/profile` (show active profile)
+- `/profile strict|balanced|permissive` (switch profile)
+- `/workspaces list|add <path>|clear` (configure multi-workspace list)
+
 ## Typical workflow
 
 1. Define a clear task objective.
@@ -75,6 +91,7 @@ The project expects Ollama (or configured equivalent) to be reachable from the c
 - Prefer focused, incremental changes over broad rewrites.
 - Add tests for every bug fix touching orchestration/safety logic.
 - Treat shell and file tools as privileged surfaces.
+- MCP tools are explicit plugin registrations; there is no implicit catch-all dispatch.
 
 ## License
 

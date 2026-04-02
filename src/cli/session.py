@@ -68,6 +68,7 @@ class SessionConfig(BaseModel):
     """Session configuration."""
     workspace: Path = Field(default_factory=Path.cwd)
     model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
+    policy_profile: str = "balanced"
     auto_checkpoint: bool = True
     require_approval: bool = True
     max_tokens_per_run: int = 50000

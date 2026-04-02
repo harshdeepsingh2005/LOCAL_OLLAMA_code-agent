@@ -21,6 +21,7 @@ from src.cli.session import PendingChange, Session, SessionConfig, SessionState
 from src.config import Configuration, get_config
 from src.core import DiffEngine, FileGuard, FileGuardPolicy, LLMClient
 from src.orchestration import Executor, RollbackManager
+from src.orchestration.workspace_manager import WorkspaceManager
 
 
 VERSION = "1.0.0"
@@ -42,6 +43,7 @@ class AgentCLI:
         quiet: bool = False,
         verbose: bool = False,
         model: Optional[str] = None,
+        policy_profile: str = "balanced",
         dry_run: bool = False,
     ) -> None:
         """
@@ -73,9 +75,13 @@ class AgentCLI:
             session_config = SessionConfig(
                 workspace=self.workspace,
                 model=model or self.config.models.default_model,
+                policy_profile=policy_profile,
                 max_tokens_per_run=self.config.limits.tokens.max_per_run,
             )
             self.session = Session(config=session_config)
+
+        self._policy_profile = self.session.config.policy_profile
+        self._workspace_roots: list[Path] = [self.workspace]
         
         # Command handler
         self.commands = CommandHandler(self.session, self.display)
@@ -213,6 +219,7 @@ class AgentCLI:
         
         # Show project mode hint
         self.display.info("💡 Tip: Use /project on for continuous iterative development")
+        self.display.info(f"💡 Active policy profile: {self._policy_profile}")
         
         # Start session
         self.session.start()
@@ -315,6 +322,9 @@ class AgentCLI:
             log_dir = Path.home() / ".local" / "share" / "agent" / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
 
+            if len(self._workspace_roots) > 1:
+                return self._process_task_multi_workspace(task, log_dir)
+
             if not self._preview_and_confirm_plan(task, log_dir):
                 self.display.info("Task cancelled before implementation")
                 return False
@@ -335,6 +345,7 @@ class AgentCLI:
                     config=self.config,
                     workspace_root=self.workspace,
                     log_dir=log_dir,
+                    policy_profile=self._policy_profile,
                 )
                 
                 # Store executor if in project mode
@@ -445,6 +456,7 @@ class AgentCLI:
             config=self.config,
             workspace_root=self.workspace,
             log_dir=log_dir,
+            policy_profile=self._policy_profile,
         )
 
         try:
@@ -547,12 +559,76 @@ class AgentCLI:
             self._executor = None
         self.display.info("[Project Mode] Disabled")
     
-    def _handle_project_callback(self, action: str) -> Any:
+    def set_policy_profile(self, profile: str) -> None:
+        """Set active policy profile for subsequent executor runs."""
+        profile = profile.lower().strip()
+        if profile not in {"strict", "balanced", "permissive"}:
+            raise ValueError(f"Unsupported policy profile: {profile}")
+        self._policy_profile = profile
+        self.session.config.policy_profile = profile
+        if self._executor is not None:
+            # Force rebuild to ensure policy is applied deterministically.
+            self._executor = None
+        self.display.success(f"[Policy Profile] Set to {profile}")
+
+    def add_workspace(self, workspace_path: str) -> None:
+        """Add workspace to sequential multi-workspace list."""
+        path = Path(workspace_path).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            self.display.error(f"Workspace path does not exist: {path}")
+            return
+        if path in self._workspace_roots:
+            self.display.info(f"Workspace already configured: {path}")
+            return
+        self._workspace_roots.append(path)
+        self._workspace_roots = sorted(set(self._workspace_roots), key=lambda p: str(p))
+        self.display.success(f"Added workspace: {path}")
+
+    def clear_workspaces(self) -> None:
+        """Reset to primary workspace only."""
+        self._workspace_roots = [self.workspace]
+        self.display.info("Workspace list reset to primary workspace")
+
+    def _process_task_multi_workspace(self, task: str, log_dir: Path) -> bool:
+        """Execute a task sequentially across configured workspaces (v1)."""
+        manager = WorkspaceManager(self._workspace_roots)
+        assignments = {name: [task] for name in manager.list_workspaces()}
+
+        self.display.info(
+            "[Multi-Workspace] Sequential execution order: "
+            + ", ".join(manager.list_workspaces())
+        )
+
+        failures = 0
+
+        def _runner(workspace_name: str, item: str) -> bool:
+            workspace_ctx = manager.get_workspace(workspace_name)
+            executor = Executor(
+                config=self.config,
+                workspace_root=workspace_ctx.root,
+                log_dir=log_dir / workspace_name,
+                policy_profile=self._policy_profile,
+            )
+            result = executor.execute(item, run_id=f"{self.session.id}_{workspace_name}")
+            self.display.info(
+                f"[Multi-Workspace:{workspace_name}] "
+                f"{result.subtasks_completed}/{result.subtasks_total} complete"
+            )
+            return result.success
+
+        for workspace_name, success in manager.execute_sequential(assignments, _runner):
+            if not success:
+                failures += 1
+                self.display.warning(f"[Multi-Workspace:{workspace_name}] execution failed")
+
+        return failures == 0
+
+    def _handle_project_callback(self, action: str, payload: Any = None) -> Any:
         """
         Handle project mode callbacks from CommandHandler.
         
         Args:
-            action: Action to perform (get_project_mode, enable_project_mode, disable_project_mode)
+            action: Action to perform
             
         Returns:
             Result of the action
@@ -563,6 +639,16 @@ class AgentCLI:
             self.enable_project_mode()
         elif action == "disable_project_mode":
             self.disable_project_mode()
+        elif action == "get_policy_profile":
+            return self._policy_profile
+        elif action == "set_policy_profile":
+            self.set_policy_profile(str(payload))
+        elif action == "get_workspaces":
+            return [str(p) for p in self._workspace_roots]
+        elif action == "add_workspace":
+            self.add_workspace(str(payload))
+        elif action == "clear_workspaces":
+            self.clear_workspaces()
         else:
             raise ValueError(f"Unknown project callback action: {action}")
     
@@ -617,6 +703,13 @@ class AgentCLI:
     help="Model to use",
 )
 @click.option(
+    "--policy-profile",
+    type=click.Choice(["strict", "balanced", "permissive"], case_sensitive=False),
+    default="balanced",
+    show_default=True,
+    help="Execution policy profile",
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Verbose output",
@@ -644,6 +737,7 @@ def main(
     workspace: Optional[Path],
     resume: Optional[str],
     model: Optional[str],
+    policy_profile: str,
     verbose: bool,
     quiet: bool,
     dry_run: bool,
@@ -675,6 +769,7 @@ def main(
         quiet=quiet,
         verbose=verbose,
         model=model,
+        policy_profile=policy_profile,
         dry_run=dry_run,
     )
     

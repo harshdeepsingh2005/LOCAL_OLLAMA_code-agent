@@ -34,6 +34,7 @@ This document describes the current architecture. For the full documentation set
 - Reproducible with same inputs
 - Full audit trail
 - Checkpoint-based recovery
+- Profile-controlled determinism (`strict` sets deterministic LLM params)
 
 ### 4. Resource Consciousness
 - Hard limits on tokens, time, iterations
@@ -123,6 +124,12 @@ This document describes the current architecture. For the full documentation set
 - JSONL export
 - Local-only storage
 
+#### Policy Profiles (`core/policy/profiles.py`)
+- Runtime behavior modes: `strict`, `balanced`, `permissive`
+- Tool allowlist enforcement per profile
+- Tool-step and fallback policy controls
+- LLM variability controls (temperature/top_p)
+
 ### Configuration (`config/`)
 
 #### models.yaml
@@ -209,8 +216,22 @@ All agents follow the same pattern:
 - Agent dispatch
 - Error handling
 - Result aggregation
+- Policy-aware tool and planning enforcement
+- Failure normalization and invariant-aware transitions
+
+#### WorkspaceManager (`orchestration/workspace_manager.py`)
+- Multi-workspace context orchestration (v1)
+- Deterministic workspace ordering
+- Context and memory isolation per workspace
+- Sequential cross-workspace execution
 
 ### Tools (`tools/`)
+
+#### Plugin Architecture
+- `ToolPlugin` contract (`tools/base.py`)
+- `ToolRegistry` deterministic registration and lookup (`tools/registry.py`)
+- Explicit plugin modules in `tools/plugins/`
+- No execution outside registry
 
 #### FilesystemTools
 - Read/write/create/delete files
@@ -229,6 +250,12 @@ All agents follow the same pattern:
 - Working directory restriction
 - Environment sanitization
 - Output capture
+
+#### Formal Guarantee Layer
+- task-state transition invariants in `TaskGraph`
+- explicit invalid-transition exceptions
+- normalized failure classes for observability and memory learning
+- postcondition checks on plugin tool outputs
 
 ### State Management (`state/`)
 
