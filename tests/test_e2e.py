@@ -354,6 +354,33 @@ class TestToolMemoryOrchestrationIntegration:
         )
         assert "MCP tool error" in call_result
 
+
+class TestPhase5PluginArchitecture:
+    """Phase 5.1 plugin registry and dispatch checks."""
+
+    def test_tool_registration_exposes_allowlist(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.core.agent_tools import ToolExecutor
+
+        memory = MemoryManager(workspace)
+        tool_executor = ToolExecutor(memory_manager=memory, workspace_root=str(workspace), run_id="run_plugin_allowlist")
+
+        allowlist = tool_executor.tool_allowlist
+        assert "read_memory" in allowlist
+        assert "run_command" in allowlist
+        assert "mcp_call" in allowlist
+
+    def test_unregistered_tool_is_rejected(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.core.agent_tools import ToolExecutor
+        from src.agents.base import ToolCall
+
+        memory = MemoryManager(workspace)
+        tool_executor = ToolExecutor(memory_manager=memory, workspace_root=str(workspace), run_id="run_plugin_reject")
+        result = tool_executor.execute_call(ToolCall(tool_name="not_registered_tool", arguments={}))
+
+        assert "Unknown tool" in result
+
     def test_executor_initialize_wires_memory_tools_and_context_pipeline(self, workspace):
         """Executor run initialization should wire memory manager, tools, and context builder."""
         from src.orchestration.executor import Executor

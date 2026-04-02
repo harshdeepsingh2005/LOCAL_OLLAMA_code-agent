@@ -26,6 +26,8 @@ from src.tools.testing import (
     TestSuiteResult,
     TypeChecker,
 )
+from src.tools.base import ToolExecutionContext, ToolPlugin
+from src.tools.registry import ToolRegistry
 
 __all__ = [
     # Filesystem
@@ -46,4 +48,8 @@ __all__ = [
     "TestResult",
     "TestSuiteResult",
     "TestRunResult",
+    # Plugin architecture
+    "ToolPlugin",
+    "ToolExecutionContext",
+    "ToolRegistry",
 ]

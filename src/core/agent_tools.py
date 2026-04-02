@@ -48,6 +48,9 @@ from src.core.pty_shell import PTYShellManager
 from src.core.file_editing_tools import FileEditingTools
 from src.core.semantic_search import CodebaseNavigator
 from src.core.mcp_client import MCPClient, MCPServerConfig
+from src.tools.base import ToolExecutionContext
+from src.tools.plugins import FilesystemPlugin, MCPPlugin, MemoryPlugin, ShellPlugin
+from src.tools.registry import ToolRegistry, ToolResolutionError
 
 if TYPE_CHECKING:
     from src.agents.base import ToolCall
@@ -270,6 +273,39 @@ class ToolExecutor:
 
         # Feature 2: MCP client (optional)
         self._mcp = mcp_client or MCPClient()
+        self._registry = ToolRegistry()
+        self._register_builtin_plugins()
+
+    def _register_builtin_plugins(self) -> None:
+        """Register all built-in tools as explicit plugins."""
+        plugins = [
+            ShellPlugin(self._execute_run_command),
+            MemoryPlugin("read_memory", self._execute_read_memory),
+            MemoryPlugin("write_memory", self._execute_write_memory, required_args=["fact"]),
+            FilesystemPlugin("read_file", "filesystem-read", self._execute_read_file, required_args=["path"]),
+            FilesystemPlugin("list_dir", "filesystem-list", self._execute_list_dir),
+            FilesystemPlugin(
+                "replace_string",
+                "filesystem-edit",
+                self._execute_replace_string,
+                required_args=["path", "old_string", "new_string"],
+            ),
+            FilesystemPlugin("write_file", "filesystem-write", self._execute_write_file, required_args=["path", "content"]),
+            FilesystemPlugin("delete_file", "filesystem-delete", self._execute_delete_file, required_args=["path"]),
+            FilesystemPlugin("grep_file", "filesystem-search", self._execute_grep_file, required_args=["path", "pattern"]),
+            FilesystemPlugin("grep_workspace", "filesystem-search", self._execute_grep_workspace, required_args=["pattern"]),
+            FilesystemPlugin("grep_search", "semantic-search", self._execute_grep_search, required_args=["pattern"]),
+            FilesystemPlugin("semantic_search", "semantic-search", self._execute_semantic_search, required_args=["query"]),
+            FilesystemPlugin("reindex_codebase", "semantic-search", self._execute_reindex_codebase),
+            MCPPlugin("mcp_list_tools", self._execute_mcp_list_tools),
+            MCPPlugin("mcp_call", self._execute_mcp_call, required_args=["tool_name"]),
+        ]
+        self._registry.register_many(plugins)
+
+    @property
+    def tool_allowlist(self) -> set[str]:
+        """Return registered tool names."""
+        return self._registry.allowlist()
 
     # ------------------------------------------------------------------
     # Main dispatch
@@ -280,78 +316,95 @@ class ToolExecutor:
         logger.info("tool_call", tool=call.tool_name)
         args = call.arguments or {}
 
-        dispatch: dict[str, Any] = {
-            # Shell
-            "run_command":      lambda: self._execute_run_command(args),
-            # Memory
-            "read_memory":      lambda: self._execute_read_memory(args),
-            "write_memory":     lambda: self._execute_write_memory(args),
-            # Granular file editing (Feature 4)
-            "read_file":        lambda: self._files.read_file(
-                                    args["path"],
-                                    args.get("start_line", 1),
-                                    args.get("end_line"),
-                                ),
-            "list_dir":         lambda: self._files.list_dir(args.get("path", ".")),
-            "replace_string":   lambda: self._files.replace_string(
-                                    args["path"],
-                                    args["old_string"],
-                                    args["new_string"],
-                                    args.get("expect_count", 1),
-                                ),
-            "write_file":       lambda: self._files.write_file(
-                                    args["path"],
-                                    args["content"],
-                                    args.get("overwrite", True),
-                                ),
-            "delete_file":      lambda: self._files.delete_file(
-                                    args["path"],
-                                    args.get("require_confirmation", False),
-                                ),
-            "grep_file":        lambda: self._files.grep_file(
-                                    args["path"],
-                                    args["pattern"],
-                                    args.get("case_sensitive", True),
-                                    args.get("max_results", 100),
-                                ),
-            "grep_workspace":   lambda: self._files.grep_workspace(
-                                    args["pattern"],
-                                    args.get("glob", "**/*.py"),
-                                    args.get("case_sensitive", True),
-                                    args.get("max_results", 200),
-                                ),
-            # Semantic navigation (Feature 6)
-            "grep_search":      lambda: self._nav.grep_search(
-                                    args["pattern"],
-                                    args.get("glob"),
-                                    args.get("case_sensitive", True),
-                                    args.get("max_results", 30),
-                                ),
-            "semantic_search":  lambda: self._nav.semantic_search(
-                                    args["query"],
-                                    args.get("top_k", 8),
-                                ),
-            "reindex_codebase": lambda: self._nav.reindex(),
-            # MCP (Feature 2)
-            "mcp_list_tools":   lambda: self._execute_mcp_list_tools(),
-            "mcp_call":         lambda: self._execute_mcp_call(args),
-        }
-
-        handler = dispatch.get(call.tool_name)
-        if handler is None:
-            # Try MCP as a catch-all for dynamically registered tools
-            mcp_result = self._mcp.call_tool(call.tool_name, args)
-            if mcp_result.success:
-                return str(mcp_result.content)
+        try:
+            plugin = self._registry.resolve(call.tool_name)
+        except ToolResolutionError:
             return f"Error: Unknown tool '{call.tool_name}'."
 
+        valid, validation_error = plugin.validate(args)
+        if not valid:
+            return f"Error: {validation_error or 'Invalid arguments'}"
+
+        context = ToolExecutionContext(
+            run_id=self._run_id,
+            workspace_root=self.workspace_root,
+        )
+        allowed, policy_error = plugin.policy_check(context, args)
+        if not allowed:
+            return f"Error: Policy blocked tool '{call.tool_name}': {policy_error}"
+
         try:
-            return str(handler())
+            return str(plugin.execute(args))
         except KeyError as e:
             return f"Error: Missing required argument {e} for tool '{call.tool_name}'."
         except Exception as e:
             logger.error("tool_error", tool=call.tool_name, error=str(e))
             return f"Error executing '{call.tool_name}': {e}"
+
+    def _execute_read_file(self, arguments: Dict[str, Any]) -> str:
+        return self._files.read_file(
+            arguments["path"],
+            arguments.get("start_line", 1),
+            arguments.get("end_line"),
+        )
+
+    def _execute_list_dir(self, arguments: Dict[str, Any]) -> str:
+        return self._files.list_dir(arguments.get("path", "."))
+
+    def _execute_replace_string(self, arguments: Dict[str, Any]) -> str:
+        return self._files.replace_string(
+            arguments["path"],
+            arguments["old_string"],
+            arguments["new_string"],
+            arguments.get("expect_count", 1),
+        )
+
+    def _execute_write_file(self, arguments: Dict[str, Any]) -> str:
+        return self._files.write_file(
+            arguments["path"],
+            arguments["content"],
+            arguments.get("overwrite", True),
+        )
+
+    def _execute_delete_file(self, arguments: Dict[str, Any]) -> str:
+        return self._files.delete_file(
+            arguments["path"],
+            arguments.get("require_confirmation", False),
+        )
+
+    def _execute_grep_file(self, arguments: Dict[str, Any]) -> str:
+        return self._files.grep_file(
+            arguments["path"],
+            arguments["pattern"],
+            arguments.get("case_sensitive", True),
+            arguments.get("max_results", 100),
+        )
+
+    def _execute_grep_workspace(self, arguments: Dict[str, Any]) -> str:
+        return self._files.grep_workspace(
+            arguments["pattern"],
+            arguments.get("glob", "**/*.py"),
+            arguments.get("case_sensitive", True),
+            arguments.get("max_results", 200),
+        )
+
+    def _execute_grep_search(self, arguments: Dict[str, Any]) -> str:
+        return self._nav.grep_search(
+            arguments["pattern"],
+            arguments.get("glob"),
+            arguments.get("case_sensitive", True),
+            arguments.get("max_results", 30),
+        )
+
+    def _execute_semantic_search(self, arguments: Dict[str, Any]) -> str:
+        return self._nav.semantic_search(
+            arguments["query"],
+            arguments.get("top_k", 8),
+        )
+
+    def _execute_reindex_codebase(self, arguments: Dict[str, Any]) -> str:
+        _ = arguments
+        return self._nav.reindex()
 
     # ------------------------------------------------------------------
     # Shell (Feature 1 + Feature 3)
@@ -427,7 +480,8 @@ class ToolExecutor:
     # MCP (Feature 2)
     # ------------------------------------------------------------------
 
-    def _execute_mcp_list_tools(self) -> str:
+    def _execute_mcp_list_tools(self, arguments: Dict[str, Any] | None = None) -> str:
+        _ = arguments
         schemas = self._mcp.get_all_tool_schemas()
         if not schemas:
             return "No MCP servers connected or no tools available."
