@@ -114,6 +114,11 @@ class RunMetrics:
     files_modified: int = 0
     diffs_applied: int = 0
     errors: int = 0
+    planned_tools: int = 0
+    executed_tools: int = 0
+    fallback_count: int = 0
+    plan_adherence_score_sum: float = 0.0
+    plan_adherence_samples: int = 0
     
     @property
     def duration_ms(self) -> float | None:
@@ -205,6 +210,11 @@ class TelemetryCollector:
     def record_run_end(self, success: bool, summary: str) -> None:
         """Record the end of a run."""
         self._run_metrics.end_time = time.perf_counter()
+        adherence_avg = (
+            self._run_metrics.plan_adherence_score_sum / self._run_metrics.plan_adherence_samples
+            if self._run_metrics.plan_adherence_samples > 0
+            else 0.0
+        )
         event = TelemetryEvent(
             event_type=EventType.RUN_END,
             run_id=self._run_id,
@@ -217,6 +227,10 @@ class TelemetryCollector:
                     "agents_executed": self._run_metrics.agents_executed,
                     "files_modified": self._run_metrics.files_modified,
                     "errors": self._run_metrics.errors,
+                    "planned_tools": self._run_metrics.planned_tools,
+                    "executed_tools": self._run_metrics.executed_tools,
+                    "fallback_count": self._run_metrics.fallback_count,
+                    "plan_adherence_score": round(adherence_avg, 4),
                 },
             },
             duration_ms=self._run_metrics.duration_ms,
@@ -419,6 +433,55 @@ class TelemetryCollector:
             },
         )
         self._record_event(event)
+
+    def record_tool_plan_metrics(
+        self,
+        planned_tools: int,
+        executed_tools: int,
+        fallback_count: int,
+        adherence_score: float,
+    ) -> None:
+        """Record aggregate metrics for planned-vs-executed tool usage."""
+        self._run_metrics.planned_tools += max(0, planned_tools)
+        self._run_metrics.executed_tools += max(0, executed_tools)
+        self._run_metrics.fallback_count += max(0, fallback_count)
+        self._run_metrics.plan_adherence_score_sum += max(0.0, min(1.0, adherence_score))
+        self._run_metrics.plan_adherence_samples += 1
+
+        event = TelemetryEvent(
+            event_type=EventType.WARNING,
+            run_id=self._run_id,
+            agent_id=self._current_agent,
+            data={
+                "warning": "tool_plan_metrics",
+                "context": {
+                    "planned_tools": planned_tools,
+                    "executed_tools": executed_tools,
+                    "fallback_count": fallback_count,
+                    "adherence_score": round(adherence_score, 3),
+                },
+            },
+        )
+        self._record_event(event)
+
+    def record_tool_plan_violation(self, reason: str, context: dict[str, Any] | None = None) -> None:
+        """Emit structured tool-plan violation event (non-blocking)."""
+        self.record_warning("tool_plan_violation", {"reason": reason, **(context or {})})
+
+    def record_fallback_invoked(
+        self,
+        primary_tool: str,
+        fallback_tool: str,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit structured fallback-invoked event (non-blocking)."""
+        payload = {
+            "primary_tool": primary_tool,
+            "fallback_tool": fallback_tool,
+        }
+        if context:
+            payload.update(context)
+        self.record_warning("fallback_invoked", payload)
     
     @property
     def run_metrics(self) -> RunMetrics:
@@ -436,6 +499,11 @@ class TelemetryCollector:
     
     def export_summary(self) -> dict[str, Any]:
         """Export a human-readable summary of the run."""
+        adherence_avg = (
+            self._run_metrics.plan_adherence_score_sum / self._run_metrics.plan_adherence_samples
+            if self._run_metrics.plan_adherence_samples > 0
+            else 0.0
+        )
         return {
             "run_id": self._run_id,
             "duration_ms": self._run_metrics.duration_ms,
@@ -449,5 +517,9 @@ class TelemetryCollector:
             "files_modified": self._run_metrics.files_modified,
             "diffs_applied": self._run_metrics.diffs_applied,
             "errors": self._run_metrics.errors,
+            "planned_tools": self._run_metrics.planned_tools,
+            "executed_tools": self._run_metrics.executed_tools,
+            "fallback_count": self._run_metrics.fallback_count,
+            "plan_adherence_score": round(adherence_avg, 4),
             "events_count": len(self._events),
         }

@@ -41,7 +41,10 @@ from src.agents import (
     ReviewerInput,
     ReviewerOutput,
     ReviewVerdict,
+    SubtaskToolPlan,
     Subtask,
+    ToolCall,
+    ToolPlanStep,
 )
 from src.config import Configuration
 from src.core import (
@@ -59,7 +62,7 @@ from src.core import (
     TelemetryCollector,
 )
 from src.core.memory import MemoryManager
-from src.core.agent_tools import ToolExecutor
+from src.core.agent_tools import TOOL_SCHEMAS, ToolExecutor
 from src.core.hitl import HITLConfig
 from src.core.mcp_client import MCPClient
 from src.orchestration.loop_controller import (
@@ -193,6 +196,11 @@ class Executor:
             max_files_per_cycle=max(1, self._config.limits.files.max_per_task),
             max_lines_per_cycle=max(100, self._config.limits.files.max_total_lines_changed),
         )
+        self._allowed_tool_names: set[str] = {
+            str(schema.get("name", ""))
+            for schema in TOOL_SCHEMAS
+            if schema.get("name")
+        }
     
     def _initialize_run(self, run_id: str | None = None) -> str:
         """Initialize components for a new run."""
@@ -514,6 +522,183 @@ class Executor:
             "success": success,
         }
         self._telemetry.record_warning("cycle_snapshot", context=snapshot)
+
+    def _is_allowed_tool_name(self, tool_name: str) -> bool:
+        """Return True when tool name is in the known allowlist or MCP namespace."""
+        if not tool_name:
+            return False
+        if tool_name in self._allowed_tool_names:
+            return True
+        return tool_name.startswith("mcp_")
+
+    def _is_tool_result_success(self, result: str) -> bool:
+        """Best-effort success check for string-based tool results."""
+        text = (result or "").strip().lower()
+        failure_prefixes = (
+            "error:",
+            "error executing",
+            "mcp tool error",
+            "command blocked",
+            "command failed",
+        )
+        return not any(text.startswith(prefix) for prefix in failure_prefixes)
+
+    def _flatten_tool_plan_names(self, plan: SubtaskToolPlan | None) -> list[str]:
+        """Flatten planned tool names including fallback branches for adherence scoring."""
+        names: list[str] = []
+        if not plan:
+            return names
+
+        def walk(step: ToolPlanStep | None, depth: int = 0) -> None:
+            if not step or depth > 3:
+                return
+            names.append(step.tool)
+            if step.fallback:
+                walk(step.fallback, depth + 1)
+
+        for step in list(plan.steps)[:3]:
+            walk(step)
+
+        return names
+
+    def _validate_tool_plan(self, plan: SubtaskToolPlan | None) -> list[str]:
+        """Validate bounds and allowlist constraints for a subtask tool plan."""
+        if plan is None:
+            return []
+
+        errors: list[str] = []
+        steps = list(plan.steps)
+        if len(steps) > 3:
+            errors.append(f"tool_plan has too many steps: {len(steps)} > 3")
+
+        def validate_step(step: ToolPlanStep, depth: int = 0) -> None:
+            if depth > 3:
+                errors.append("tool_plan fallback nesting exceeds safe depth")
+                return
+            if not self._is_allowed_tool_name(step.tool):
+                errors.append(f"tool_plan references unknown tool: {step.tool}")
+            if not step.reason.strip():
+                errors.append(f"tool_plan step missing reason for tool: {step.tool}")
+            if step.fallback:
+                validate_step(step.fallback, depth + 1)
+
+        for step in steps[:3]:
+            validate_step(step)
+
+        return errors
+
+    def _execute_tool_plan_step(
+        self,
+        step: ToolPlanStep,
+        executed_tools: list[str],
+        depth: int = 0,
+    ) -> tuple[bool, str, int]:
+        """Execute one tool-plan step and fallback chain."""
+        if self._tool_executor is None:
+            return False, "Tool executor unavailable", 0
+
+        if depth > 3:
+            return False, "Fallback depth exceeded", 0
+
+        result = self._tool_executor.execute_call(
+            ToolCall(tool_name=step.tool, arguments=dict(step.arguments))
+        )
+        executed_tools.append(step.tool)
+        success = self._is_tool_result_success(result)
+        context_chunk = (
+            f"Planned tool `{step.tool}` ({step.reason}) with args {step.arguments}:\n"
+            f"{result}"
+        )
+
+        if success:
+            return True, context_chunk, 0
+
+        if step.fallback is None:
+            return False, context_chunk, 0
+
+        if self._telemetry:
+            self._telemetry.record_fallback_invoked(
+                primary_tool=step.tool,
+                fallback_tool=step.fallback.tool,
+                context={"reason": step.reason},
+            )
+
+        fallback_ok, fallback_context, fallback_count = self._execute_tool_plan_step(
+            step.fallback,
+            executed_tools,
+            depth + 1,
+        )
+        joined = context_chunk + "\n\nFallback result:\n" + fallback_context
+        return fallback_ok, joined, fallback_count + 1
+
+    def _execute_subtask_tool_plan(
+        self,
+        subtask: Subtask,
+    ) -> tuple[bool, str, list[str], int, str | None]:
+        """Execute bounded planned tools for a subtask before free-form coder tool calls."""
+        plan = subtask.tool_plan
+        if plan is None:
+            return True, "", [], 0, None
+
+        validation_errors = self._validate_tool_plan(plan)
+        if validation_errors:
+            reason = "; ".join(validation_errors)
+            if self._telemetry:
+                self._telemetry.record_tool_plan_violation(
+                    reason=reason,
+                    context={"task_id": subtask.id},
+                )
+            return False, "", [], 0, reason
+
+        executed_tools: list[str] = []
+        chunks: list[str] = []
+        fallback_count = 0
+        for step in list(plan.steps)[:3]:
+            ok, chunk, used_fallbacks = self._execute_tool_plan_step(step, executed_tools)
+            chunks.append(chunk)
+            fallback_count += used_fallbacks
+            if not ok:
+                return False, "\n\n".join(chunks), executed_tools, fallback_count, (
+                    f"Planned tool step failed without successful fallback: {step.tool}"
+                )
+
+        return True, "\n\n".join(chunks), executed_tools, fallback_count, None
+
+    def _record_tool_plan_adherence(
+        self,
+        subtask: Subtask,
+        planned_tools: list[str],
+        executed_tools: list[str],
+        fallback_count: int,
+    ) -> None:
+        """Record planned-vs-actual tool adherence telemetry without blocking execution."""
+        if not self._telemetry or not planned_tools:
+            return
+
+        matches = sum(1 for a, b in zip(planned_tools, executed_tools) if a == b)
+        adherence = matches / max(1, len(planned_tools))
+        extras = [t for t in executed_tools if t not in planned_tools]
+        missing = [t for t in planned_tools if t not in executed_tools]
+
+        self._telemetry.record_tool_plan_metrics(
+            planned_tools=len(planned_tools),
+            executed_tools=len(executed_tools),
+            fallback_count=fallback_count,
+            adherence_score=adherence,
+        )
+
+        if extras or missing:
+            self._telemetry.record_tool_plan_violation(
+                reason="planned_vs_actual_tool_mismatch",
+                context={
+                    "task_id": subtask.id,
+                    "planned": planned_tools,
+                    "executed": executed_tools,
+                    "extras": extras,
+                    "missing": missing,
+                    "adherence_score": round(adherence, 3),
+                },
+            )
 
     def _record_failure_learning(self, task_description: str, error_message: str) -> None:
         """Persist normalized failure learning signal."""
@@ -1152,6 +1337,25 @@ class Executor:
                     if warnings:
                         output.identified_risks.extend(warnings)
 
+                for subtask in output.subtasks:
+                    tool_plan_errors = self._validate_tool_plan(subtask.tool_plan)
+                    if not tool_plan_errors:
+                        continue
+
+                    reason = "; ".join(tool_plan_errors)
+                    output.identified_risks.append(
+                        f"Subtask {subtask.id} tool_plan invalid and was disabled: {reason}"
+                    )
+                    subtask.tool_plan = None
+                    if self._telemetry:
+                        self._telemetry.record_tool_plan_violation(
+                            reason="invalid_subtask_tool_plan",
+                            context={
+                                "subtask_id": subtask.id,
+                                "errors": tool_plan_errors,
+                            },
+                        )
+
             return output
         return None
     
@@ -1346,7 +1550,25 @@ class Executor:
     ) -> CoderOutput | None:
         """Execute the coder agent. Returns None if iteration limit reached."""
         assert self._loop is not None
-        
+
+        planned_tools = self._flatten_tool_plan_names(subtask.tool_plan)
+        plan_ok, planned_context, executed_tools, fallback_count, plan_error = self._execute_subtask_tool_plan(
+            subtask
+        )
+        if not plan_ok:
+            self._record_tool_plan_adherence(
+                subtask=subtask,
+                planned_tools=planned_tools,
+                executed_tools=executed_tools,
+                fallback_count=fallback_count,
+            )
+            return CoderOutput(
+                task_id=subtask.id,
+                status=AgentStatus.FAILED,
+                error=plan_error or "Subtask tool plan failed",
+                tool_calls=[],
+            )
+
         tool_results = ""
         max_tool_context_chars = 3000
         while self._loop.is_running:
@@ -1354,7 +1576,10 @@ class Executor:
             if self._active_context_packet:
                 base_context = self._active_context_packet.to_prompt_context(max_chars=1200)
 
-            composed_context = tool_results[-max_tool_context_chars:]
+            composed_context = ""
+            if planned_context:
+                composed_context += planned_context[-max_tool_context_chars:] + "\n\n"
+            composed_context += tool_results[-max_tool_context_chars:]
             if base_context:
                 composed_context = (base_context + "\n\n" + composed_context).strip()
 
@@ -1389,20 +1614,55 @@ class Executor:
                             "coder_fallback_used",
                             context={"task_id": subtask.id, "reason": output.error or "parse_failure"},
                         )
+                    self._record_tool_plan_adherence(
+                        subtask=subtask,
+                        planned_tools=planned_tools,
+                        executed_tools=executed_tools,
+                        fallback_count=fallback_count,
+                    )
                     return fallback
+                self._record_tool_plan_adherence(
+                    subtask=subtask,
+                    planned_tools=planned_tools,
+                    executed_tools=executed_tools,
+                    fallback_count=fallback_count,
+                )
                 return output
             
             if output.status == AgentStatus.SUCCESS and getattr(output, "tool_calls", None):
                 if self._tool_executor is None:
                     raise ExecutionError("ToolExecutor not initialized")
                 for call in output.tool_calls:
+                    executed_tools.append(call.tool_name)
+                    if planned_tools and call.tool_name not in planned_tools and self._telemetry:
+                        self._telemetry.record_tool_plan_violation(
+                            reason="unplanned_tool_execution",
+                            context={
+                                "task_id": subtask.id,
+                                "tool_name": call.tool_name,
+                                "planned_tools": planned_tools,
+                            },
+                        )
                     res = self._tool_executor.execute_call(call)
                     tool_results += f"\n\nRan tool `{call.tool_name}` with args {call.arguments}:\nResult: {res}"
                     if len(tool_results) > max_tool_context_chars * 2:
                         tool_results = tool_results[-max_tool_context_chars * 2:]
                 continue
-            
+
+            self._record_tool_plan_adherence(
+                subtask=subtask,
+                planned_tools=planned_tools,
+                executed_tools=executed_tools,
+                fallback_count=fallback_count,
+            )
             return output
+
+        self._record_tool_plan_adherence(
+            subtask=subtask,
+            planned_tools=planned_tools,
+            executed_tools=executed_tools,
+            fallback_count=fallback_count,
+        )
         return None
 
     def _build_coder_fallback_output(

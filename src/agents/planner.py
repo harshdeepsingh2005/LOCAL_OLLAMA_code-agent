@@ -28,6 +28,8 @@ from src.agents.base import (
     PlannerInput,
     PlannerOutput,
     Subtask,
+    SubtaskToolPlan,
+    ToolPlanStep,
     ToolCall,
 )
 from src.agents.json_utils import parse_json_object
@@ -48,6 +50,7 @@ class PlannerSubtaskSchema(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list, min_length=1)
     target_files: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    tool_plan: PlannerSubtaskToolPlanSchema | None = None
     estimated_complexity: str = Field(default="medium")
 
 
@@ -58,6 +61,25 @@ class PlannerToolCallSchema(BaseModel):
 
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlannerToolPlanStepSchema(BaseModel):
+    """Schema for one deterministic tool-plan step."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str = Field(min_length=1)
+    reason: str = Field(min_length=3)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    fallback: "PlannerToolPlanStepSchema | None" = None
+
+
+class PlannerSubtaskToolPlanSchema(BaseModel):
+    """Schema for bounded deterministic tool-plan emitted for a subtask."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[PlannerToolPlanStepSchema] = Field(default_factory=list, max_length=3)
 
 
 class PlannerResponseSchema(BaseModel):
@@ -136,6 +158,20 @@ You MUST respond with a valid JSON object in this exact format:
             "acceptance_criteria": ["Criterion 1", "Criterion 2"],
             "target_files": ["path/to/file.py"],
             "dependencies": [],
+            "tool_plan": {
+                "steps": [
+                    {
+                        "tool": "read_file",
+                        "reason": "Inspect existing implementation before edits",
+                        "arguments": {"path": "src/main.py"},
+                        "fallback": {
+                            "tool": "grep_workspace",
+                            "reason": "Fallback discovery if path moved",
+                            "arguments": {"pattern": "def main"}
+                        }
+                    }
+                ]
+            },
             "estimated_complexity": "low|medium|high"
         }
     ],
@@ -151,6 +187,7 @@ You MUST respond with a valid JSON object in this exact format:
 
 ## Rules:
 - Maximum 10 subtasks
+- If a subtask includes `tool_plan`, it must contain at most 3 ordered steps
 - For simple, single-file edits (especially docs/readme wording changes), produce exactly 1 focused subtask.
 - Each subtask must have at least 1 acceptance criterion
 - If the task is unclear, set requires_clarification to true and list questions
@@ -304,6 +341,7 @@ You MUST respond with a valid JSON object in this exact format:
                     acceptance_criteria=list(st.acceptance_criteria),
                     target_files=[str(path) for path in st.target_files if str(path).strip()],
                     dependencies=list(st.dependencies),
+                    tool_plan=self._convert_tool_plan(getattr(st, "tool_plan", None)),
                     estimated_complexity=st.estimated_complexity,
                 )
                 for st in normalized_subtasks
@@ -441,3 +479,26 @@ You MUST respond with a valid JSON object in this exact format:
             score += 0.05
 
         return max(0.0, min(1.0, score))
+
+    def _convert_tool_plan(
+        self,
+        schema_plan: PlannerSubtaskToolPlanSchema | None,
+    ) -> SubtaskToolPlan | None:
+        """Convert planner tool-plan schema into contract model with strict validation."""
+        if schema_plan is None:
+            return None
+
+        steps = [self._convert_tool_plan_step(step) for step in list(schema_plan.steps)[:3]]
+        if not steps:
+            return None
+        return SubtaskToolPlan(steps=steps)
+
+    def _convert_tool_plan_step(self, step: PlannerToolPlanStepSchema) -> ToolPlanStep:
+        """Convert one recursive planner tool-plan step into contract model."""
+        fallback = self._convert_tool_plan_step(step.fallback) if step.fallback else None
+        return ToolPlanStep(
+            tool=step.tool.strip(),
+            reason=step.reason.strip(),
+            arguments=dict(step.arguments),
+            fallback=fallback,
+        )

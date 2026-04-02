@@ -116,6 +116,32 @@ class PlannerInput(AgentInput):
     )
 
 
+class ToolPlanStep(BaseModel):
+    """A single deterministic tool step planned by the planner."""
+
+    tool: str = Field(..., min_length=1, description="Tool name to execute")
+    reason: str = Field(..., min_length=3, description="Why this step is required")
+    arguments: dict[str, Any] = Field(default_factory=dict, description="Tool call arguments")
+    fallback: ToolPlanStep | None = Field(
+        default=None,
+        description="Optional fallback step if the primary step fails",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SubtaskToolPlan(BaseModel):
+    """Bounded tool execution plan for a subtask."""
+
+    steps: list[ToolPlanStep] = Field(
+        default_factory=list,
+        max_length=3,
+        description="Ordered tool steps to run before/around implementation",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class Subtask(BaseModel):
     """A single subtask in the plan."""
     id: str = Field(..., description="Unique subtask identifier")
@@ -133,6 +159,14 @@ class Subtask(BaseModel):
     dependencies: list[str] = Field(
         default_factory=list,
         description="IDs of subtasks this depends on"
+    )
+    tool_calls: list[ToolCall] = Field(
+        default_factory=list,
+        description="Legacy top-level style tool calls retained for compatibility",
+    )
+    tool_plan: SubtaskToolPlan | None = Field(
+        default=None,
+        description="Structured deterministic tool plan for this subtask",
     )
     estimated_complexity: str = Field(
         "medium",
@@ -246,6 +280,13 @@ class ReviewIssue(BaseModel):
     line_range: str | None = Field(None, description="e.g., '10-15'")
     description: str = Field(..., description="What the issue is")
     suggestion: str = Field("", description="How to fix it")
+    issue_code: str = Field("", description="Stable machine-readable issue code")
+    acceptance_criterion_ref: str = Field(
+        "",
+        description="Acceptance criterion identifier or text this issue blocks",
+    )
+    evidence: str = Field("", description="Concrete evidence from code/execution")
+    blocking: bool = Field(False, description="Whether this issue blocks completion")
     
     model_config = ConfigDict(extra="forbid")
 

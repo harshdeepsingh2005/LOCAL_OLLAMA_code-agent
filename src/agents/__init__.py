@@ -22,7 +22,10 @@ from src.agents.base import (
     ReviewerOutput,
     ReviewIssue,
     ReviewVerdict,
+    SubtaskToolPlan,
     Subtask,
+    ToolCall,
+    ToolPlanStep,
 )
 from src.agents.coder import CoderAgent
 from src.agents.fixer import FixerAgent
@@ -42,6 +45,9 @@ __all__ = [
     "PlannerInput",
     "PlannerOutput",
     "Subtask",
+    "SubtaskToolPlan",
+    "ToolCall",
+    "ToolPlanStep",
     # Coder
     "CoderAgent",
     "CoderInput",
