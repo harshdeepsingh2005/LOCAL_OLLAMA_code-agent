@@ -41,6 +41,7 @@ from src.orchestration.context_pipeline import (
     TaskRouter,
     ValidationLayer,
 )
+from src.orchestration.workspace_manager import WorkspaceContext, WorkspaceManager
 
 __all__ = [
     # Executor
@@ -74,4 +75,7 @@ __all__ = [
     "ContextPacket",
     "ContextBuilder",
     "ValidationLayer",
+    # Multi-workspace orchestration
+    "WorkspaceManager",
+    "WorkspaceContext",
 ]

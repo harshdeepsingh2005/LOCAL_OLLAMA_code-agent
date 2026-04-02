@@ -465,6 +465,50 @@ class TestPhase5FormalGuarantees:
         assert executor._classify_failure("Tool command blocked by policy") == "tool_error"
         assert executor._classify_failure("contract violation on output schema") == "contract_violation"
 
+
+class TestPhase5MultiWorkspace:
+    """Phase 5.4 multi-workspace orchestration checks."""
+
+    def test_workspace_contexts_are_isolated(self, workspace):
+        from src.orchestration.workspace_manager import WorkspaceManager
+
+        ws_a = workspace / "workspace_a"
+        ws_b = workspace / "workspace_b"
+        ws_a.mkdir(exist_ok=True)
+        ws_b.mkdir(exist_ok=True)
+
+        manager = WorkspaceManager([ws_b, ws_a])
+        manager.get_workspace("workspace_a").memory.add_fact("workspace_a_fact")
+
+        ctx_a = manager.build_workspace_context("workspace_a", "add API endpoint")
+        ctx_b = manager.build_workspace_context("workspace_b", "add API endpoint")
+
+        assert "workspace_a_fact" in ctx_a
+        assert "workspace_a_fact" not in ctx_b
+
+    def test_multi_workspace_execution_order_is_deterministic(self, workspace):
+        from src.orchestration.workspace_manager import WorkspaceManager
+
+        ws_a = workspace / "a"
+        ws_b = workspace / "b"
+        ws_a.mkdir(exist_ok=True)
+        ws_b.mkdir(exist_ok=True)
+
+        manager = WorkspaceManager([ws_b, ws_a])
+        assignments = {
+            "b": ["task-b1", "task-b2"],
+            "a": ["task-a1"],
+        }
+
+        order: list[tuple[str, str]] = []
+
+        def _runner(workspace_name: str, item: str) -> str:
+            order.append((workspace_name, item))
+            return item
+
+        manager.execute_sequential(assignments, _runner)
+        assert order == [("a", "task-a1"), ("b", "task-b1"), ("b", "task-b2")]
+
     def test_executor_initialize_wires_memory_tools_and_context_pipeline(self, workspace):
         """Executor run initialization should wire memory manager, tools, and context builder."""
         from src.orchestration.executor import Executor
