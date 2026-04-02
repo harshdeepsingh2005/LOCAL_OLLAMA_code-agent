@@ -381,6 +381,60 @@ class TestPhase5PluginArchitecture:
 
         assert "Unknown tool" in result
 
+
+class TestPhase5PolicyProfiles:
+    """Phase 5.2 policy profile enforcement checks."""
+
+    def test_strict_profile_blocks_unsafe_tools(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.core.agent_tools import ToolExecutor
+        from src.core.policy import get_policy_profile
+        from src.agents.base import ToolCall
+
+        memory = MemoryManager(workspace)
+        tool_executor = ToolExecutor(
+            memory_manager=memory,
+            workspace_root=str(workspace),
+            policy_profile=get_policy_profile("strict"),
+            run_id="run_policy_strict",
+        )
+
+        blocked = tool_executor.execute_call(ToolCall(tool_name="run_command", arguments={"command": "pwd"}))
+        assert "Policy blocked" in blocked
+
+    def test_balanced_profile_allows_controlled_execution(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.core.agent_tools import ToolExecutor
+        from src.core.policy import get_policy_profile
+        from src.agents.base import ToolCall
+
+        memory = MemoryManager(workspace)
+        tool_executor = ToolExecutor(
+            memory_manager=memory,
+            workspace_root=str(workspace),
+            policy_profile=get_policy_profile("balanced"),
+            run_id="run_policy_balanced",
+        )
+
+        output = tool_executor.execute_call(ToolCall(tool_name="read_memory", arguments={}))
+        assert isinstance(output, str)
+
+    def test_strict_profile_sets_deterministic_llm_parameters(self, workspace):
+        from src.config import get_config
+        from src.orchestration.executor import Executor
+
+        cfg = get_config()
+        executor = Executor(
+            config=cfg,
+            workspace_root=workspace,
+            log_dir=workspace / "logs",
+            policy_profile="strict",
+        )
+        executor._initialize_run("run_policy_determinism")
+        assert executor._llm_client is not None
+        assert executor._llm_client._default_config.temperature == 0.0
+        assert executor._llm_client._default_config.top_p == 1.0
+
     def test_executor_initialize_wires_memory_tools_and_context_pipeline(self, workspace):
         """Executor run initialization should wire memory manager, tools, and context builder."""
         from src.orchestration.executor import Executor

@@ -64,7 +64,9 @@ from src.core import (
 from src.core.memory import MemoryManager
 from src.core.agent_tools import TOOL_SCHEMAS, ToolExecutor
 from src.core.hitl import HITLConfig
+from src.core.llm_client import ModelConfig
 from src.core.mcp_client import MCPClient
+from src.core.policy import PolicyProfile, get_policy_profile
 from src.orchestration.loop_controller import (
     LoopController,
     TerminationReason,
@@ -149,6 +151,7 @@ class Executor:
         log_dir: Path,
         hitl_config: HITLConfig | None = None,
         mcp_client: MCPClient | None = None,
+        policy_profile: str = "balanced",
     ) -> None:
         """
         Initialize the executor.
@@ -165,6 +168,7 @@ class Executor:
         self._log_dir = log_dir
         self._hitl_config = hitl_config
         self._mcp_client = mcp_client
+        self._policy_profile: PolicyProfile = get_policy_profile(policy_profile)
         
         # Ensure directories exist
         self._workspace_root.mkdir(parents=True, exist_ok=True)
@@ -210,6 +214,11 @@ class Executor:
         self._llm_client = LLMClient(
             base_url=self._config.models.ollama.base_url,
             timeout=float(self._config.models.ollama.timeout_seconds),
+            default_config=ModelConfig(
+                name=self._config.models.default_model,
+                temperature=self._policy_profile.llm_temperature,
+                top_p=self._policy_profile.llm_top_p,
+            ),
         )
         
         # Initialize file guard
@@ -262,6 +271,7 @@ class Executor:
             workspace_root=str(self._workspace_root),
             hitl_config=self._hitl_config,
             mcp_client=self._mcp_client,
+            policy_profile=self._policy_profile,
             run_id=self._run_id,
         )
         
@@ -527,9 +537,9 @@ class Executor:
         """Return True when tool name is in the known allowlist or MCP namespace."""
         if not tool_name:
             return False
-        if tool_name in self._allowed_tool_names:
+        if tool_name in self._allowed_tool_names and tool_name in self._policy_profile.allowed_tools:
             return True
-        return tool_name.startswith("mcp_")
+        return tool_name.startswith("mcp_") and tool_name in self._policy_profile.allowed_tools
 
     def _is_tool_result_success(self, result: str) -> bool:
         """Best-effort success check for string-based tool results."""
@@ -549,14 +559,16 @@ class Executor:
         if not plan:
             return names
 
+        max_steps = max(1, self._policy_profile.max_tool_steps)
+
         def walk(step: ToolPlanStep | None, depth: int = 0) -> None:
-            if not step or depth > 3:
+            if not step or depth > max_steps:
                 return
             names.append(step.tool)
             if step.fallback:
                 walk(step.fallback, depth + 1)
 
-        for step in list(plan.steps)[:3]:
+        for step in list(plan.steps)[:max_steps]:
             walk(step)
 
         return names
@@ -568,11 +580,12 @@ class Executor:
 
         errors: list[str] = []
         steps = list(plan.steps)
-        if len(steps) > 3:
-            errors.append(f"tool_plan has too many steps: {len(steps)} > 3")
+        max_steps = max(1, self._policy_profile.max_tool_steps)
+        if len(steps) > max_steps:
+            errors.append(f"tool_plan has too many steps: {len(steps)} > {max_steps}")
 
         def validate_step(step: ToolPlanStep, depth: int = 0) -> None:
-            if depth > 3:
+            if depth > max_steps:
                 errors.append("tool_plan fallback nesting exceeds safe depth")
                 return
             if not self._is_allowed_tool_name(step.tool):
@@ -599,6 +612,9 @@ class Executor:
 
         if depth > 3:
             return False, "Fallback depth exceeded", 0
+
+        if not self._policy_profile.fallback_allowed and depth > 0:
+            return False, "Fallback execution blocked by policy profile", 0
 
         result = self._tool_executor.execute_call(
             ToolCall(tool_name=step.tool, arguments=dict(step.arguments))
@@ -653,7 +669,7 @@ class Executor:
         executed_tools: list[str] = []
         chunks: list[str] = []
         fallback_count = 0
-        for step in list(plan.steps)[:3]:
+        for step in list(plan.steps)[: max(1, self._policy_profile.max_tool_steps)]:
             ok, chunk, used_fallbacks = self._execute_tool_plan_step(step, executed_tools)
             chunks.append(chunk)
             fallback_count += used_fallbacks

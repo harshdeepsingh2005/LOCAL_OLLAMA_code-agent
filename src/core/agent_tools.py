@@ -48,6 +48,7 @@ from src.core.pty_shell import PTYShellManager
 from src.core.file_editing_tools import FileEditingTools
 from src.core.semantic_search import CodebaseNavigator
 from src.core.mcp_client import MCPClient, MCPServerConfig
+from src.core.policy import PolicyProfile, get_policy_profile
 from src.tools.base import ToolExecutionContext
 from src.tools.plugins import FilesystemPlugin, MCPPlugin, MemoryPlugin, ShellPlugin
 from src.tools.registry import ToolRegistry, ToolResolutionError
@@ -253,6 +254,7 @@ class ToolExecutor:
         workspace_root: str,
         hitl_config: HITLConfig | None = None,
         mcp_client: MCPClient | None = None,
+        policy_profile: PolicyProfile | None = None,
         run_id: str = "default",
     ) -> None:
         self.memory = memory_manager
@@ -273,6 +275,7 @@ class ToolExecutor:
 
         # Feature 2: MCP client (optional)
         self._mcp = mcp_client or MCPClient()
+        self._policy_profile = policy_profile or get_policy_profile("balanced")
         self._registry = ToolRegistry()
         self._register_builtin_plugins()
 
@@ -325,9 +328,24 @@ class ToolExecutor:
         if not valid:
             return f"Error: {validation_error or 'Invalid arguments'}"
 
+        profile_allowed, profile_reason = self._policy_profile.validate_tool_call(call.tool_name)
+        if not profile_allowed:
+            return f"Error: Policy blocked tool '{call.tool_name}': {profile_reason}"
+
+        if not self._policy_profile.file_write_permissions and call.tool_name in {
+            "write_file",
+            "replace_string",
+            "delete_file",
+        }:
+            return (
+                f"Error: Policy blocked tool '{call.tool_name}': "
+                f"profile '{self._policy_profile.name}' is read-only"
+            )
+
         context = ToolExecutionContext(
             run_id=self._run_id,
             workspace_root=self.workspace_root,
+            metadata={"policy_profile": self._policy_profile.name},
         )
         allowed, policy_error = plugin.policy_check(context, args)
         if not allowed:
