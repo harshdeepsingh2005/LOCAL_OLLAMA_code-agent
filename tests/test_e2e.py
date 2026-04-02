@@ -1185,6 +1185,322 @@ class TestMalformedOutputResilience:
         assert out["ok"] is True
 
 
+class TestDeterministicPlanningExplainabilityAndContext:
+    """Coverage for deterministic tool plans, telemetry, reviewer explainability, and context quality."""
+
+    def test_tool_plan_respected_and_executed_in_order(self, workspace):
+        from src.orchestration.executor import Executor
+        from src.config import get_config
+        from src.agents import (
+            AgentStatus,
+            CoderOutput,
+            Subtask,
+            SubtaskToolPlan,
+            ToolPlanStep,
+        )
+
+        cfg = get_config()
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=workspace / "logs")
+        executor._initialize_run("run_tool_plan_respected")
+        assert executor._loop is not None
+        executor._loop.start()
+
+        subtask = Subtask(
+            id="1",
+            title="Read memory first",
+            description="Use planned tools before coding",
+            acceptance_criteria=["planned tool executed"],
+            target_files=["src/calculator.py"],
+            tool_plan=SubtaskToolPlan(
+                steps=[
+                    ToolPlanStep(
+                        tool="read_memory",
+                        reason="Load persistent context",
+                        arguments={},
+                    )
+                ]
+            ),
+        )
+
+        assert executor._tool_executor is not None
+        executed: list[str] = []
+
+        def _tool_spy(call):
+            executed.append(call.tool_name)
+            return "memory loaded"
+
+        executor._tool_executor.execute_call = _tool_spy  # type: ignore[assignment]
+
+        def _coder_ok(*_args, **_kwargs):
+            return CoderOutput(task_id="1", status=AgentStatus.SUCCESS, changes=[])
+
+        executor._coder.execute = _coder_ok  # type: ignore[assignment]
+
+        output = executor._execute_coder(subtask, {"src/calculator.py": "def add(a, b):\n    return a + b\n"})
+        assert output is not None
+        assert output.status == AgentStatus.SUCCESS
+        assert executed[:1] == ["read_memory"]
+
+    def test_invalid_tool_plan_rejected_gracefully(self, workspace):
+        from src.orchestration.executor import Executor
+        from src.config import get_config
+        from src.agents import Subtask, SubtaskToolPlan, ToolPlanStep, AgentStatus
+
+        cfg = get_config()
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=workspace / "logs")
+        executor._initialize_run("run_invalid_tool_plan")
+        assert executor._loop is not None
+        executor._loop.start()
+
+        subtask = Subtask(
+            id="2",
+            title="Invalid plan",
+            description="Should fail safely",
+            acceptance_criteria=["error handled"],
+            target_files=["src/calculator.py"],
+            tool_plan=SubtaskToolPlan(
+                steps=[
+                    ToolPlanStep(
+                        tool="totally_unknown_tool",
+                        reason="invalid",
+                        arguments={},
+                    )
+                ]
+            ),
+        )
+
+        output = executor._execute_coder(subtask, {"src/calculator.py": "def add(a,b):\n    return a+b\n"})
+        assert output is not None
+        assert output.status == AgentStatus.FAILED
+        assert "unknown tool" in (output.error or "")
+
+        assert executor._telemetry is not None
+        violations = [
+            e
+            for e in executor._telemetry.events
+            if e.event_type.value == "warning"
+            and e.data.get("warning") == "tool_plan_violation"
+        ]
+        assert violations
+
+    def test_tool_plan_fallback_execution_works(self, workspace):
+        from src.orchestration.executor import Executor
+        from src.config import get_config
+        from src.agents import Subtask, SubtaskToolPlan, ToolPlanStep
+
+        cfg = get_config()
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=workspace / "logs")
+        executor._initialize_run("run_tool_plan_fallback")
+
+        subtask = Subtask(
+            id="3",
+            title="Fallback step",
+            description="Primary tool fails then fallback succeeds",
+            acceptance_criteria=["fallback executed"],
+            target_files=["src/calculator.py"],
+            tool_plan=SubtaskToolPlan(
+                steps=[
+                    ToolPlanStep(
+                        tool="read_memory",
+                        reason="attempt primary",
+                        arguments={},
+                        fallback=ToolPlanStep(
+                            tool="grep_search",
+                            reason="fallback search",
+                            arguments={"pattern": "def add"},
+                        ),
+                    )
+                ]
+            ),
+        )
+
+        assert executor._tool_executor is not None
+        calls = {"n": 0}
+
+        def _tool_spy(call):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "Error: primary failed"
+            return "fallback ok"
+
+        executor._tool_executor.execute_call = _tool_spy  # type: ignore[assignment]
+
+        ok, _ctx, executed, fallback_count, err = executor._execute_subtask_tool_plan(subtask)
+        assert ok is True
+        assert err is None
+        assert executed == ["read_memory", "grep_search"]
+        assert fallback_count == 1
+
+    def test_telemetry_records_plan_metrics_and_violations(self, workspace):
+        from src.orchestration.executor import Executor
+        from src.config import get_config
+        from src.agents import Subtask, SubtaskToolPlan, ToolPlanStep
+
+        cfg = get_config()
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=workspace / "logs")
+        executor._initialize_run("run_tool_plan_metrics")
+        assert executor._telemetry is not None
+
+        subtask = Subtask(
+            id="4",
+            title="Metrics",
+            description="Check planned vs executed metrics",
+            acceptance_criteria=["metrics available"],
+            target_files=["src/calculator.py"],
+            tool_plan=SubtaskToolPlan(steps=[ToolPlanStep(tool="read_memory", reason="seed", arguments={})]),
+        )
+
+        executor._record_tool_plan_adherence(
+            subtask=subtask,
+            planned_tools=["read_memory"],
+            executed_tools=["read_memory", "grep_search"],
+            fallback_count=1,
+        )
+
+        metrics = executor._telemetry.run_metrics
+        assert metrics.planned_tools >= 1
+        assert metrics.executed_tools >= 2
+        assert metrics.fallback_count >= 1
+        assert metrics.plan_adherence_samples >= 1
+
+        violation_events = [
+            e
+            for e in executor._telemetry.events
+            if e.event_type.value == "warning"
+            and e.data.get("warning") == "tool_plan_violation"
+        ]
+        assert violation_events
+
+    def test_reviewer_schema_includes_issue_code_and_criterion_ref(self, workspace):
+        from src.agents.reviewer import ReviewerAgent
+        from src.agents import ReviewerInput, Subtask, CodeChange
+
+        reviewer = ReviewerAgent()
+        reviewer_input = ReviewerInput(
+            task_id="r1",
+            run_id="run_r1",
+            subtask=Subtask(
+                id="r1",
+                title="Review",
+                description="Review for explainability",
+                acceptance_criteria=["Criterion 1"],
+                target_files=["src/calculator.py"],
+            ),
+            code_changes=[
+                CodeChange(
+                    file_path="src/calculator.py",
+                    change_type="modify",
+                    description="change",
+                    new_content="def add(a, b):\n    return a + b\n",
+                )
+            ],
+            original_files={},
+            implementation_notes="",
+        )
+
+        payload = json.dumps(
+            {
+                "verdict": "REQUEST_CHANGES",
+                "task_complete": False,
+                "summary": "needs fixes",
+                "issues": [
+                    {
+                        "severity": "major",
+                        "file_path": "src/calculator.py",
+                        "line_range": "1-1",
+                        "description": "No input validation",
+                        "suggestion": "Validate numeric inputs",
+                        "issue_code": "VAL_001",
+                        "acceptance_criterion_ref": "Criterion 1",
+                        "evidence": "Function accepts arbitrary non-numeric types",
+                        "blocking": True,
+                    }
+                ],
+                "criteria_met": {"Criterion 1": False},
+            }
+        )
+
+        out = reviewer._parse_response(payload, reviewer_input, MagicMock())
+        assert out.issues
+        issue = out.issues[0]
+        assert issue.issue_code == "VAL_001"
+        assert issue.acceptance_criterion_ref == "Criterion 1"
+        assert issue.blocking is True
+
+    def test_reviewer_blocking_issue_forces_non_terminal_state(self, workspace):
+        from src.agents.reviewer import ReviewerAgent
+        from src.agents import ReviewerInput, Subtask, CodeChange, ReviewVerdict
+
+        reviewer = ReviewerAgent()
+        reviewer_input = ReviewerInput(
+            task_id="r2",
+            run_id="run_r2",
+            subtask=Subtask(
+                id="r2",
+                title="Review",
+                description="Blocking issue must prevent completion",
+                acceptance_criteria=["Criterion 1"],
+                target_files=["src/calculator.py"],
+            ),
+            code_changes=[
+                CodeChange(
+                    file_path="src/calculator.py",
+                    change_type="modify",
+                    description="change",
+                    new_content="def add(a, b):\n    return a + b\n",
+                )
+            ],
+            original_files={},
+            implementation_notes="",
+        )
+
+        payload = json.dumps(
+            {
+                "verdict": "APPROVE",
+                "task_complete": True,
+                "summary": "looks good",
+                "issues": [
+                    {
+                        "severity": "minor",
+                        "file_path": "src/calculator.py",
+                        "description": "Actually blocking",
+                        "suggestion": "Fix",
+                        "issue_code": "BLOCK_001",
+                        "acceptance_criterion_ref": "Criterion 1",
+                        "evidence": "Missing acceptance criterion behavior",
+                        "blocking": True,
+                    }
+                ],
+                "criteria_met": {"Criterion 1": False},
+            }
+        )
+
+        out = reviewer._parse_response(payload, reviewer_input, MagicMock())
+        assert out.task_complete is False
+        assert out.verdict == ReviewVerdict.REQUEST_CHANGES
+
+    def test_context_packet_caps_and_order_are_deterministic(self):
+        from src.orchestration.context_pipeline import ContextPacket
+
+        packet = ContextPacket(
+            route_summary="domain=backend",
+            interfaces_context="I\n" * 120,
+            dependencies_context="D\n" * 120,
+            recent_failures_context="F\n" * 120,
+            recent_successes_context="S\n" * 120,
+            documentation_context="DOC\n" * 300,
+        )
+
+        rendered_a = packet.to_prompt_context(max_chars=900)
+        rendered_b = packet.to_prompt_context(max_chars=900)
+
+        assert rendered_a == rendered_b
+        assert "## Interfaces" in rendered_a
+        assert "## Dependencies" in rendered_a
+        assert rendered_a.index("## Interfaces") < rendered_a.index("## Dependencies")
+        assert len(rendered_a) <= 900
+
+
 class TestRollbackFlow:
     """Test rollback functionality in agent loop."""
     

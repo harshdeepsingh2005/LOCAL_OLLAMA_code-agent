@@ -46,6 +46,10 @@ class ContextPacket:
     evergreen_context: str = ""
     documentation_context: str = ""
     retrieved_code_context: str = ""
+    interfaces_context: str = ""
+    dependencies_context: str = ""
+    recent_failures_context: str = ""
+    recent_successes_context: str = ""
     learned_patterns_context: str = ""
     route_summary: str = ""
     constraints: list[str] = field(default_factory=list)
@@ -58,16 +62,39 @@ class ContextPacket:
             sections.append("## Route\n" + self.route_summary)
         if self.evergreen_context:
             sections.append("## Evergreen Context\n" + self.evergreen_context)
-        if self.documentation_context:
-            sections.append("## Documentation\n" + self.documentation_context)
+
+        prioritized = [
+            ("## Interfaces", self.interfaces_context),
+            ("## Dependencies", self.dependencies_context),
+            ("## Recent Failures", self.recent_failures_context),
+            ("## Recent Successes", self.recent_successes_context),
+            ("## Documentation", self.documentation_context),
+            ("## Retrieved Code", self.retrieved_code_context),
+        ]
+
+        for header, body in prioritized:
+            if body:
+                sections.append(f"{header}\n{body}")
+
         if self.learned_patterns_context:
             sections.append(self.learned_patterns_context)
-        if self.retrieved_code_context:
-            sections.append("## Retrieved Code\n" + self.retrieved_code_context)
         if self.constraints:
             sections.append("## Constraints\n" + "\n".join(f"- {c}" for c in self.constraints))
 
-        text = "\n\n".join(sections).strip()
+        composed: list[str] = []
+        current = 0
+        for section in sections:
+            chunk = section.strip()
+            if not chunk:
+                continue
+            separator = 2 if composed else 0
+            proposed = current + len(chunk) + separator
+            if proposed > max_chars:
+                break
+            composed.append(chunk)
+            current = proposed
+
+        text = "\n\n".join(composed).strip()
         if len(text) <= max_chars:
             return text
         return text[: max_chars - 20].rstrip() + "\n... [truncated]"
@@ -171,9 +198,15 @@ class ContextBuilder:
 
     def build(self, task_description: str, route: TaskRoute) -> ContextPacket:
         """Assemble a task-specific context packet."""
-        docs = self._load_docs_context(max_chars=2000)
+        docs = self._load_docs_context(task_description=task_description, max_chars=2000)
         retrieved = self._retrieve_code(task_description, route.module_hints)
-        learned = self._memory.format_learned_patterns(task_description, max_chars=1500)
+        learned = self._memory.format_learned_patterns(task_description, max_chars=900)
+
+        patterns = self._memory.retrieve_relevant_patterns(task_description, k_failures=3, k_successes=3)
+        failures = self._format_pattern_lines(patterns.get("failures", []), kind="failure", max_chars=700)
+        successes = self._format_pattern_lines(patterns.get("successes", []), kind="success", max_chars=700)
+        interfaces = self._build_interfaces_context(route.module_hints, max_chars=800)
+        dependencies = self._build_dependencies_context(max_chars=700)
 
         route_summary = (
             f"domain={route.domain.value}; module_hints={route.module_hints or ['none']}"
@@ -183,6 +216,10 @@ class ContextBuilder:
             evergreen_context=self._memory.get_all_context(),
             documentation_context=docs,
             retrieved_code_context=retrieved,
+            interfaces_context=interfaces,
+            dependencies_context=dependencies,
+            recent_failures_context=failures,
+            recent_successes_context=successes,
             learned_patterns_context=learned,
             route_summary=route_summary,
             constraints=list(route.constraints),
@@ -213,31 +250,48 @@ class ContextBuilder:
         """Retrieve minimal relevant code snippets using semantic and pattern search."""
         snippets: list[str] = []
 
-        try:
-            snippets.append(self._navigator.semantic_search(task_description, top_k=4))
-        except Exception:
-            pass
-
-        for hint in module_hints[:3]:
+        # Priority 1: exact module/path hints (deterministic sorted order)
+        for hint in sorted(set(module_hints))[:3]:
             try:
                 snippets.append(self._navigator.grep_search(hint, max_results=3))
             except Exception:
                 continue
+
+        # Priority 2: semantic matches
+        try:
+            snippets.append(self._navigator.semantic_search(task_description, top_k=4))
+        except Exception:
+            pass
 
         text = "\n\n".join(s for s in snippets if s).strip()
         if len(text) <= 2400:
             return text
         return text[:2380].rstrip() + "\n... [truncated]"
 
-    def _load_docs_context(self, max_chars: int = 2000) -> str:
+    def _load_docs_context(self, task_description: str, max_chars: int = 2000) -> str:
         """Load canonical architecture/docs snippets for grounding."""
+        task_lower = task_description.lower()
+        architecture_weighted = any(
+            token in task_lower
+            for token in ("architecture", "contract", "orchestration", "design")
+        )
+
         candidates = [
-            self._root / "core_context.md",
-            self._root / "docs" / "agent-evergreen-context.md",
             self._root / "docs" / "architecture.md",
             self._root / "docs" / "agent_contracts.md",
             self._root / "docs" / "execution_flow.md",
+            self._root / "core_context.md",
+            self._root / "docs" / "agent-evergreen-context.md",
         ]
+
+        if architecture_weighted:
+            candidates = [
+                self._root / "docs" / "architecture.md",
+                self._root / "docs" / "agent_contracts.md",
+                self._root / "core_context.md",
+                self._root / "docs" / "execution_flow.md",
+                self._root / "docs" / "agent-evergreen-context.md",
+            ]
 
         sections: list[str] = []
         for path in candidates:
@@ -252,6 +306,100 @@ class ContextBuilder:
             sections.append(f"[{path.name}]\n{content[:700]}")
 
         text = "\n\n".join(sections)
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    def _build_interfaces_context(self, module_hints: list[str], max_chars: int = 800) -> str:
+        """Build deterministic interface signatures section from likely relevant files."""
+        candidate_files = [
+            p for p in sorted(self._root.rglob("*.py")) if "__pycache__" not in str(p)
+        ]
+
+        prioritized: list[Path] = []
+        for hint in sorted(set(module_hints)):
+            for path in candidate_files:
+                rel = path.relative_to(self._root).as_posix()
+                if hint in rel and path not in prioritized:
+                    prioritized.append(path)
+
+        if not prioritized:
+            prioritized = candidate_files[:4]
+
+        lines: list[str] = []
+        pattern = re.compile(r"^\s*(def|class)\s+[A-Za-z_][A-Za-z0-9_]*")
+        for path in prioritized[:4]:
+            rel = path.relative_to(self._root).as_posix()
+            try:
+                content = path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                continue
+            for line in content[:220]:
+                if pattern.match(line):
+                    lines.append(f"{rel}: {line.strip()}")
+                if len("\n".join(lines)) > max_chars:
+                    break
+            if len("\n".join(lines)) > max_chars:
+                break
+
+        text = "\n".join(lines).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    def _build_dependencies_context(self, max_chars: int = 700) -> str:
+        """Build deterministic dependency summary from pyproject and import signals."""
+        lines: list[str] = []
+
+        pyproject = self._root / "pyproject.toml"
+        if pyproject.exists() and pyproject.is_file():
+            try:
+                content = pyproject.read_text(encoding="utf-8")
+                dep_lines = [ln.strip() for ln in content.splitlines() if "dependencies" in ln.lower()]
+                lines.extend(dep_lines[:8])
+            except Exception:
+                pass
+
+        import_pattern = re.compile(r"^\s*(from\s+[A-Za-z0-9_\.]+\s+import|import\s+[A-Za-z0-9_\.]+)")
+        for path in sorted((self._root / "src").rglob("*.py"))[:8]:
+            try:
+                content = path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                continue
+            rel = path.relative_to(self._root).as_posix()
+            for line in content[:120]:
+                if import_pattern.match(line):
+                    lines.append(f"{rel}: {line.strip()}")
+                if len("\n".join(lines)) > max_chars:
+                    break
+            if len("\n".join(lines)) > max_chars:
+                break
+
+        text = "\n".join(lines).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    @staticmethod
+    def _format_pattern_lines(
+        items: list[dict[str, object]],
+        kind: str,
+        max_chars: int,
+    ) -> str:
+        """Format recent failure/success lines deterministically with bounded size."""
+        lines: list[str] = []
+        if kind == "failure":
+            for item in items:
+                category = str(item.get("category", "unknown"))
+                hint = str(item.get("resolution_hint", ""))
+                lines.append(f"{category}: {hint}")
+        else:
+            for item in items:
+                ptype = str(item.get("pattern_type", "pattern"))
+                summary = str(item.get("summary", ""))
+                lines.append(f"{ptype}: {summary}")
+
+        text = "\n".join(lines).strip()
         if len(text) <= max_chars:
             return text
         return text[: max_chars - 20].rstrip() + "\n... [truncated]"
