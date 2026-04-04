@@ -56,6 +56,7 @@ class ContextPacket:
     semantic_links_context: str = ""
     learned_patterns_context: str = ""
     route_summary: str = ""
+    task_focus: str = ""
     constraints: list[str] = field(default_factory=list)
 
     def to_prompt_context(self, max_chars: int = 3200) -> str:
@@ -80,9 +81,10 @@ class ContextPacket:
             ("## Retrieved Code", self.retrieved_code_context),
         ]
 
-        for header, body in prioritized:
+        ranked_sections = self._rank_sections_by_relevance(prioritized)
+        for header, body in ranked_sections:
             if body:
-                sections.append(f"{header}\n{body}")
+                sections.append(f"{header}\n{self._compress_section(body, max_chars=max(200, max_chars // 4))}")
 
         if self.learned_patterns_context:
             sections.append(self.learned_patterns_context)
@@ -106,6 +108,82 @@ class ContextPacket:
         if len(text) <= max_chars:
             return text
         return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    def _rank_sections_by_relevance(self, sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Rank context sections with query-aware relevance and stable base weights."""
+        base_weight: dict[str, float] = {
+            "## Interfaces": 0.95,
+            "## Retrieved Code": 0.9,
+            "## Recent Failures": 0.85,
+            "## Semantic Links": 0.8,
+            "## Test Signals": 0.75,
+            "## Dependencies": 0.7,
+            "## Recent Successes": 0.65,
+            "## Tool Performance": 0.6,
+            "## Meta Reflections": 0.55,
+            "## Documentation": 0.5,
+        }
+
+        query_tokens = self._tokenize(self.task_focus)
+
+        scored: list[tuple[float, tuple[str, str]]] = []
+        for header, body in sections:
+            if not body:
+                continue
+            overlap = self._jaccard(query_tokens, self._tokenize(header + " " + body[:800]))
+            score = (0.65 * base_weight.get(header, 0.4)) + (0.35 * overlap)
+            scored.append((score, (header, body)))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [item[1] for item in scored]
+
+    @staticmethod
+    def _compress_section(body: str, max_chars: int) -> str:
+        """Keep section concise by preserving the most information-dense lines."""
+        text = (body or "").strip()
+        if len(text) <= max_chars:
+            return text
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+        def density(line: str) -> tuple[int, int]:
+            alnum = sum(1 for ch in line if ch.isalnum())
+            symbols = sum(1 for ch in line if ch in "[](){}:=._-/")
+            return (alnum + symbols, len(line))
+
+        ranked = sorted(lines, key=density, reverse=True)
+        selected: list[str] = []
+        current = 0
+        for line in ranked:
+            proposed = current + len(line) + (1 if selected else 0)
+            if proposed > max_chars:
+                continue
+            selected.append(line)
+            current = proposed
+            if current >= max_chars - 24:
+                break
+
+        if not selected:
+            return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+        output = "\n".join(selected)
+        if len(output) <= max_chars:
+            return output
+        return output[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        return {token for token in re.findall(r"[a-zA-Z_]{3,}", (text or "").lower())}
+
+    @staticmethod
+    def _jaccard(a: set[str], b: set[str]) -> float:
+        if not a or not b:
+            return 0.0
+        union = len(a | b)
+        if union == 0:
+            return 0.0
+        return len(a & b) / union
 
 
 class TaskRouter:
@@ -238,6 +316,7 @@ class ContextBuilder:
             semantic_links_context=semantic_links,
             learned_patterns_context=learned,
             route_summary=route_summary,
+            task_focus=task_description,
             constraints=list(route.constraints),
         )
 
