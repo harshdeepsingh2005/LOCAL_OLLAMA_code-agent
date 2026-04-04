@@ -604,6 +604,63 @@ class TestPhase5MultiWorkspace:
         prompt = packet.to_prompt_context(max_chars=1200)
         assert "Learned Patterns" in prompt
 
+    def test_memory_semantic_graph_links_task_error_fix_file(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        memory.record_failure_pattern(
+            task_description="Fix import error in api router",
+            error_message="ImportError: cannot import APIRouter",
+        )
+        memory.record_success_patterns_from_changes(
+            changes=[
+                {
+                    "file_path": "src/routes/api.py",
+                    "change_type": "modify",
+                    "description": "fix import and add endpoint",
+                    "new_content": "from fastapi import APIRouter\nrouter = APIRouter()\n",
+                }
+            ],
+            task_description="Fix import error in api router",
+        )
+        memory.record_task_outcome(
+            task_description="Fix import error in api router",
+            success=True,
+            error=None,
+        )
+
+        data = memory._load_memory(memory._project_memory_file)
+        graph = data.get("semantic_graph", {})
+        nodes = graph.get("nodes", [])
+        edges = graph.get("edges", [])
+
+        node_types = {str(n.get("type", "")) for n in nodes}
+        relations = {str(e.get("relation", "")) for e in edges}
+
+        assert "task" in node_types
+        assert "failure" in node_types
+        assert "file" in node_types
+        assert "outcome" in node_types
+        assert "encountered" in relations
+        assert "modified" in relations
+        assert "resulted_in" in relations
+
+    def test_context_builder_includes_semantic_links(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.orchestration.context_pipeline import ContextBuilder, TaskRoute, TaskDomain
+
+        memory = MemoryManager(workspace)
+        memory.record_failure_pattern(
+            task_description="Fix api router import",
+            error_message="ImportError: APIRouter missing",
+        )
+
+        builder = ContextBuilder(workspace_root=workspace, memory_manager=memory)
+        packet = builder.build("Fix api router import", TaskRoute(domain=TaskDomain.BACKEND))
+        prompt = packet.to_prompt_context(max_chars=1400)
+
+        assert "## Semantic Links" in prompt
+
     def test_planning_tool_calls_execute_before_final_plan(self, workspace):
         """Planner tool calls should be executed and planning should continue to subtasks."""
         from src.orchestration.executor import Executor

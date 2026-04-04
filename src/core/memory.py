@@ -94,12 +94,24 @@ class MemoryManager:
             "failure_patterns": [],
             "success_patterns": [],
             "task_outcomes": [],
+            "semantic_graph": {
+                "nodes": [],
+                "edges": [],
+            },
         }
 
     def _ensure_schema(self, data: dict[str, Any]) -> dict[str, Any]:
         default = self._default_memory()
         for key, value in default.items():
             data.setdefault(key, value if not isinstance(value, list) else list(value))
+
+        if not isinstance(data.get("semantic_graph"), dict):
+            data["semantic_graph"] = {"nodes": [], "edges": []}
+        graph = data["semantic_graph"]
+        if not isinstance(graph.get("nodes"), list):
+            graph["nodes"] = []
+        if not isinstance(graph.get("edges"), list):
+            graph["edges"] = []
         return data
 
     def _load_memory(self, file_path: Path) -> dict[str, Any]:
@@ -158,6 +170,27 @@ class MemoryManager:
     @staticmethod
     def _tokenize(text: str) -> set[str]:
         return set(re.findall(r"[a-zA-Z_]{3,}", text.lower()))
+
+    @staticmethod
+    def _stable_hash(value: str) -> str:
+        return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+
+    def _text_vector(self, text: str, dims: int = 64) -> list[float]:
+        vec = [0.0] * dims
+        tokens = sorted(self._tokenize(text))
+        for token in tokens:
+            idx = int(hashlib.sha1(token.encode("utf-8")).hexdigest(), 16) % dims
+            vec[idx] += 1.0
+        norm = math.sqrt(sum(v * v for v in vec))
+        if norm <= 1e-9:
+            return vec
+        return [v / norm for v in vec]
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        return max(0.0, min(1.0, sum(x * y for x, y in zip(a, b))))
 
     @staticmethod
     def _jaccard(a: set[str], b: set[str]) -> float:
@@ -234,6 +267,184 @@ class MemoryManager:
             return "schema_mismatch"
         return "unknown_error"
 
+    @staticmethod
+    def _canonical_failure_category(category: str) -> str:
+        normalized = category.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "missing_import": "missing_import",
+            "import_error": "missing_import",
+            "modulenotfound": "missing_import",
+            "module_not_found": "missing_import",
+            "undefined_module": "missing_import",
+            "missing_module": "missing_import",
+            "missing_file": "missing_file",
+            "file_not_found": "missing_file",
+            "type_mismatch": "type_mismatch",
+            "type_error": "type_mismatch",
+        }
+        return aliases.get(normalized, normalized or "unknown_error")
+
+    @staticmethod
+    def _canonical_pattern_type(pattern_type: str) -> str:
+        normalized = pattern_type.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "api_endpoint_pattern": "api_endpoint_pattern",
+            "endpoint_pattern": "api_endpoint_pattern",
+            "validation_pattern": "validation_pattern",
+            "schema_validation_pattern": "validation_pattern",
+            "retry_pattern": "retry_pattern",
+            "parser_hardening_pattern": "parser_hardening_pattern",
+            "json_parser_hardening": "parser_hardening_pattern",
+        }
+        return aliases.get(normalized, normalized or "code_structure_pattern")
+
+    def _upsert_graph_node(
+        self,
+        data: dict[str, Any],
+        node_type: str,
+        label: str,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        graph = data.setdefault("semantic_graph", {"nodes": [], "edges": []})
+        nodes = graph.setdefault("nodes", [])
+        normalized_label = " ".join(label.strip().split())[:280]
+        node_id = f"{node_type}_{self._stable_hash(node_type + ':' + normalized_label.lower())}"
+
+        existing = None
+        for node in nodes:
+            if str(node.get("id", "")) == node_id:
+                existing = node
+                break
+
+        now = self._now_iso()
+        base_tags = sorted(set(str(t) for t in (tags or []) if str(t).strip()))
+        vector = self._text_vector(f"{normalized_label} {' '.join(base_tags)}")
+
+        if existing is None:
+            existing = {
+                "id": node_id,
+                "type": node_type,
+                "label": normalized_label,
+                "tags": base_tags,
+                "vector": vector,
+                "frequency": 1,
+                "created_at": now,
+                "last_used_at": now,
+                "metadata": metadata or {},
+            }
+            nodes.append(existing)
+        else:
+            existing["frequency"] = int(existing.get("frequency", 1)) + 1
+            existing["last_used_at"] = now
+            existing["label"] = normalized_label
+            merged_tags = set(str(t) for t in existing.get("tags", [])) | set(base_tags)
+            existing["tags"] = sorted(t for t in merged_tags if t)
+            existing["vector"] = self._text_vector(f"{normalized_label} {' '.join(existing['tags'])}")
+            if metadata:
+                merged_meta = dict(existing.get("metadata", {}))
+                merged_meta.update(metadata)
+                existing["metadata"] = merged_meta
+
+        return node_id
+
+    def _upsert_graph_edge(
+        self,
+        data: dict[str, Any],
+        source_id: str,
+        target_id: str,
+        relation: str,
+    ) -> None:
+        graph = data.setdefault("semantic_graph", {"nodes": [], "edges": []})
+        edges = graph.setdefault("edges", [])
+        edge_id = f"edge_{self._stable_hash(source_id + ':' + relation + ':' + target_id)}"
+
+        for edge in edges:
+            if str(edge.get("id", "")) == edge_id:
+                edge["weight"] = int(edge.get("weight", 1)) + 1
+                edge["last_used_at"] = self._now_iso()
+                return
+
+        edges.append(
+            {
+                "id": edge_id,
+                "source": source_id,
+                "target": target_id,
+                "relation": relation,
+                "weight": 1,
+                "created_at": self._now_iso(),
+                "last_used_at": self._now_iso(),
+            }
+        )
+
+    def _record_semantic_failure_link(
+        self,
+        data: dict[str, Any],
+        task_description: str,
+        error_message: str,
+        category: str,
+        pattern_id: str,
+        tags: list[str],
+    ) -> None:
+        task_id = self._upsert_graph_node(
+            data,
+            "task",
+            task_description[:240],
+            tags=tags,
+            metadata={"source": "record_failure_pattern"},
+        )
+        failure_id = self._upsert_graph_node(
+            data,
+            "failure",
+            f"{category}: {error_message[:220]}",
+            tags=[category, *tags],
+            metadata={"pattern_id": pattern_id},
+        )
+        pattern_node_id = self._upsert_graph_node(
+            data,
+            "failure_pattern",
+            pattern_id,
+            tags=[category],
+            metadata={"category": category},
+        )
+
+        self._upsert_graph_edge(data, task_id, failure_id, "encountered")
+        self._upsert_graph_edge(data, failure_id, pattern_node_id, "mapped_to")
+
+    def _record_semantic_success_link(
+        self,
+        data: dict[str, Any],
+        task_description: str,
+        file_path: str,
+        pattern_type: str,
+        pattern_id: str,
+        tags: list[str],
+    ) -> None:
+        task_id = self._upsert_graph_node(
+            data,
+            "task",
+            task_description[:240] or "unspecified task",
+            tags=tags,
+            metadata={"source": "record_success_patterns_from_changes"},
+        )
+        file_id = self._upsert_graph_node(
+            data,
+            "file",
+            file_path or "unknown_file",
+            tags=["file", *tags],
+            metadata={"path": file_path},
+        )
+        pattern_node_id = self._upsert_graph_node(
+            data,
+            "success_pattern",
+            pattern_id,
+            tags=[pattern_type, *tags],
+            metadata={"pattern_type": pattern_type},
+        )
+
+        self._upsert_graph_edge(data, task_id, file_id, "modified")
+        self._upsert_graph_edge(data, file_id, pattern_node_id, "resolved_with")
+
     def _extract_failure_tags(self, task_description: str, error_message: str) -> list[str]:
         tags = self._tokenize(task_description) | self._tokenize(error_message)
         priority = [
@@ -295,6 +506,7 @@ class MemoryManager:
     ) -> str:
         data = self._load_memory(self._project_memory_file)
         category = self._normalize_error_category(error_message)
+        category = self._canonical_failure_category(category)
         tags = self._extract_failure_tags(task_description, error_message)
         summary = f"{category}: {task_description[:120]}"
         root_cause = error_message[:240]
@@ -309,12 +521,14 @@ class MemoryManager:
         )
 
         now = self._now_iso()
+        pattern_id = ""
         if similar_idx is not None:
             item = patterns[similar_idx]
             item["frequency"] = int(item.get("frequency", 1)) + 1
             item["last_used_at"] = now
             item["confidence"] = self._normalize_confidence(float(item.get("confidence", 0.5)) + 0.02)
             patterns[similar_idx] = item
+            pattern_id = str(item.get("pattern_id", ""))
         else:
             pattern_id = "fp_" + hashlib.sha1(f"{category}:{summary}".encode("utf-8")).hexdigest()[:12]
             pattern = FailurePattern(
@@ -331,7 +545,18 @@ class MemoryManager:
             )
             patterns.append(pattern.model_dump())
 
+        self._record_semantic_failure_link(
+            data=data,
+            task_description=task_description,
+            error_message=error_message,
+            category=category,
+            pattern_id=pattern_id or "fp_unknown",
+            tags=tags,
+        )
+
         data["failure_patterns"] = patterns[-200:]
+        data["semantic_graph"]["nodes"] = data["semantic_graph"].get("nodes", [])[-600:]
+        data["semantic_graph"]["edges"] = data["semantic_graph"].get("edges", [])[-1200:]
         self._save_memory(self._project_memory_file, data)
         return ActionStatus.SUCCESS
 
@@ -342,6 +567,7 @@ class MemoryManager:
 
         for change in changes:
             pattern_type, tags, summary, reusable = self._extract_success_structure(change)
+            pattern_type = self._canonical_pattern_type(pattern_type)
             if task_description:
                 tags = list(dict.fromkeys(tags + self._extract_failure_tags(task_description, "")[:2]))
 
@@ -362,6 +588,7 @@ class MemoryManager:
                 item["last_used_at"] = now
                 item["confidence"] = self._normalize_confidence(float(item.get("confidence", 0.6)) + 0.03)
                 patterns[similar_idx] = item
+                pattern_id = str(item.get("pattern_id", "sp_unknown"))
             else:
                 pattern_id = "sp_" + hashlib.sha1(f"{pattern_type}:{summary}".encode("utf-8")).hexdigest()[:12]
                 pattern = SuccessPattern(
@@ -378,9 +605,96 @@ class MemoryManager:
                 )
                 patterns.append(pattern.model_dump())
 
+            self._record_semantic_success_link(
+                data=data,
+                task_description=task_description,
+                file_path=str(change.get("file_path", "")),
+                pattern_type=pattern_type,
+                pattern_id=pattern_id,
+                tags=tags,
+            )
+
         data["success_patterns"] = patterns[-200:]
+        data["semantic_graph"]["nodes"] = data["semantic_graph"].get("nodes", [])[-600:]
+        data["semantic_graph"]["edges"] = data["semantic_graph"].get("edges", [])[-1200:]
         self._save_memory(self._project_memory_file, data)
         return ActionStatus.SUCCESS
+
+    def retrieve_semantic_links(self, task_description: str, limit: int = 6) -> list[dict[str, Any]]:
+        data = self._load_memory(self._project_memory_file)
+        graph = data.get("semantic_graph", {})
+        nodes = list(graph.get("nodes", []))
+        edges = list(graph.get("edges", []))
+        if not nodes:
+            return []
+
+        query_vec = self._text_vector(task_description)
+        scored_nodes: list[tuple[float, dict[str, Any]]] = []
+        for node in nodes:
+            node_vec = [float(v) for v in node.get("vector", []) if isinstance(v, (int, float))]
+            if not node_vec:
+                node_vec = self._text_vector(str(node.get("label", "")) + " " + " ".join(node.get("tags", [])))
+            score = self._cosine_similarity(query_vec, node_vec)
+            freq_boost = self._frequency_norm(int(node.get("frequency", 1)))
+            total = (0.75 * score) + (0.25 * freq_boost)
+            scored_nodes.append((total, node))
+
+        scored_nodes.sort(key=lambda item: item[0], reverse=True)
+        top_nodes = scored_nodes[: max(1, limit)]
+        top_ids = {str(node.get("id", "")) for _, node in top_nodes}
+
+        related_edges = [
+            edge
+            for edge in edges
+            if str(edge.get("source", "")) in top_ids or str(edge.get("target", "")) in top_ids
+        ][: max(2, limit * 2)]
+
+        rendered: list[dict[str, Any]] = []
+        for score, node in top_nodes:
+            node_id = str(node.get("id", ""))
+            node_edges = [e for e in related_edges if e.get("source") == node_id or e.get("target") == node_id]
+            rendered.append(
+                {
+                    "score": round(score, 4),
+                    "node": {
+                        "id": node_id,
+                        "type": str(node.get("type", "unknown")),
+                        "label": str(node.get("label", "")),
+                    },
+                    "edges": [
+                        {
+                            "relation": str(edge.get("relation", "related_to")),
+                            "source": str(edge.get("source", "")),
+                            "target": str(edge.get("target", "")),
+                        }
+                        for edge in node_edges[:3]
+                    ],
+                }
+            )
+        return rendered
+
+    def format_semantic_links(self, task_description: str, max_chars: int = 900) -> str:
+        links = self.retrieve_semantic_links(task_description, limit=6)
+        if not links:
+            return ""
+
+        lines: list[str] = []
+        for item in links:
+            node = item.get("node", {})
+            label = str(node.get("label", "")).strip()
+            node_type = str(node.get("type", "unknown"))
+            score = float(item.get("score", 0.0))
+            if not label:
+                continue
+            lines.append(f"- [{node_type}] {label} (score={score:.2f})")
+            for edge in item.get("edges", [])[:2]:
+                relation = str(edge.get("relation", "related_to"))
+                lines.append(f"  - relation: {relation}")
+
+        block = "\n".join(lines).strip()
+        if len(block) <= max_chars:
+            return block
+        return block[: max_chars - 20].rstrip() + "\n... [truncated]"
 
     def retrieve_relevant_patterns(
         self,
@@ -458,7 +772,27 @@ class MemoryManager:
                 "timestamp": self._now_iso(),
             }
         )
+
+        task_node_id = self._upsert_graph_node(
+            data,
+            "task",
+            task_description[:240],
+            tags=self._extract_failure_tags(task_description, error or "")[:6],
+            metadata={"source": "record_task_outcome"},
+        )
+        outcome_label = "success" if success else "failure"
+        outcome_node_id = self._upsert_graph_node(
+            data,
+            "outcome",
+            outcome_label,
+            tags=[outcome_label],
+            metadata={"error": (error or "")[:180]},
+        )
+        self._upsert_graph_edge(data, task_node_id, outcome_node_id, "resulted_in")
+
         data["task_outcomes"] = outcomes[-300:]
+        data["semantic_graph"]["nodes"] = data["semantic_graph"].get("nodes", [])[-600:]
+        data["semantic_graph"]["edges"] = data["semantic_graph"].get("edges", [])[-1200:]
         self._save_memory(self._project_memory_file, data)
         return ActionStatus.SUCCESS
 
