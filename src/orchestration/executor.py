@@ -518,7 +518,68 @@ class Executor:
             "risk_recorded": risk_recorded,
             "issue_count": len(reviewer_output.issues),
         }
-        return no_errors or tests_passed or risk_recorded, gate
+        no_issues = len(reviewer_output.issues) == 0
+        return no_errors and tests_passed and (risk_recorded or no_issues), gate
+
+    @staticmethod
+    def _build_change_fingerprint(changes: list[CodeChange]) -> str:
+        """Create a deterministic fingerprint of current proposed code changes."""
+        entries: list[str] = []
+        for change in sorted(changes, key=lambda c: (c.file_path, c.change_type, c.description)):
+            payload = f"{change.file_path}|{change.change_type}|{change.description}|{change.new_content or ''}"
+            digest = json.dumps(payload, sort_keys=True)
+            entries.append(digest)
+        return "||".join(entries)
+
+    @staticmethod
+    def _build_issue_fingerprint(reviewer_output: ReviewerOutput) -> str:
+        """Create a deterministic fingerprint of reviewer issue state."""
+        entries: list[str] = []
+        for issue in sorted(
+            reviewer_output.issues,
+            key=lambda i: (i.severity, i.file_path, i.issue_code, i.description),
+        ):
+            entries.append(
+                "|".join(
+                    [
+                        issue.severity,
+                        issue.file_path,
+                        issue.issue_code,
+                        issue.description[:140],
+                        issue.suggestion[:80],
+                    ]
+                )
+            )
+        return "||".join(entries)
+
+    @staticmethod
+    def _fingerprint_similarity(a: str, b: str) -> float:
+        """Compute token-based similarity between two fingerprints."""
+        if not a or not b:
+            return 0.0
+        a_tokens = set(re.findall(r"[a-zA-Z_]{3,}", a.lower()))
+        b_tokens = set(re.findall(r"[a-zA-Z_]{3,}", b.lower()))
+        if not a_tokens and not b_tokens:
+            return 1.0
+        union = a_tokens | b_tokens
+        if not union:
+            return 0.0
+        return len(a_tokens & b_tokens) / len(union)
+
+    def _is_no_progress_cycle(
+        self,
+        previous_change_fp: str,
+        previous_issue_fp: str,
+        current_change_fp: str,
+        current_issue_fp: str,
+    ) -> bool:
+        """Detect whether two consecutive review cycles represent non-progress."""
+        if previous_change_fp == current_change_fp and previous_issue_fp == current_issue_fp:
+            return True
+
+        change_sim = self._fingerprint_similarity(previous_change_fp, current_change_fp)
+        issue_sim = self._fingerprint_similarity(previous_issue_fp, current_issue_fp)
+        return change_sim >= 0.95 and issue_sim >= 0.9
 
     def _record_cycle_snapshot(
         self,
@@ -1434,6 +1495,9 @@ class Executor:
         
         # Review-fix loop
         current_changes = coder_output.changes
+        previous_change_fp: str | None = None
+        previous_issue_fp: str | None = None
+        strategy_shift_attempted = False
 
         # Adaptive orchestration: allow no-op completion when coder determines
         # requested behavior already exists and no edits are required.
@@ -1553,6 +1617,56 @@ class Executor:
                     f"Changes rejected by reviewer: {reviewer_output.summary}",
                 )
                 return False
+
+            current_change_fp = self._build_change_fingerprint(current_changes)
+            current_issue_fp = self._build_issue_fingerprint(reviewer_output)
+            if (
+                previous_change_fp is not None
+                and previous_issue_fp is not None
+                and self._is_no_progress_cycle(
+                    previous_change_fp=previous_change_fp,
+                    previous_issue_fp=previous_issue_fp,
+                    current_change_fp=current_change_fp,
+                    current_issue_fp=current_issue_fp,
+                )
+            ):
+                if self._telemetry:
+                    self._telemetry.record_warning(
+                        "fixer_stagnation_detected",
+                        context={
+                            "task_id": task_node.id,
+                            "strategy_shift_attempted": strategy_shift_attempted,
+                        },
+                    )
+
+                if not strategy_shift_attempted:
+                    strategy_shift_attempted = True
+                    refreshed_file_contents = self._get_file_contents(task_node.subtask.target_files)
+                    shifted_output = self._execute_coder(task_node.subtask, refreshed_file_contents)
+                    if shifted_output is None:
+                        return None
+                    if shifted_output.status == AgentStatus.SUCCESS and shifted_output.changes:
+                        shifted_fp = self._build_change_fingerprint(shifted_output.changes)
+                        if shifted_fp != current_change_fp:
+                            current_changes = shifted_output.changes
+                            previous_change_fp = None
+                            previous_issue_fp = None
+                            if self._telemetry:
+                                self._telemetry.record_warning(
+                                    "fixer_stagnation_strategy_shift",
+                                    context={"task_id": task_node.id, "strategy": "reinvoke_coder"},
+                                )
+                            continue
+
+                task_node.mark_failed("Stagnation detected: repeated non-progress in fix loop")
+                self._record_failure_learning(
+                    task_node.subtask.description,
+                    "Stagnation detected: repeated non-progress in fix loop",
+                )
+                return False
+
+            previous_change_fp = current_change_fp
+            previous_issue_fp = current_issue_fp
             
             # REQUEST_CHANGES: Invoke fixer to address issues
             # This is the ONLY path that continues the loop

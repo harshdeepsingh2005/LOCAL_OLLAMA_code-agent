@@ -979,6 +979,126 @@ class TestPhase5MultiWorkspace:
         assert ok is True
         assert node.status == TaskStatus.COMPLETED
 
+    def test_execute_task_detects_stagnation_and_shifts_strategy(self, workspace):
+        """Repeated no-progress fix cycles should trigger coder strategy shift and allow completion."""
+        from src.orchestration.executor import Executor
+        from src.orchestration.task_graph import TaskNode, TaskStatus
+        from src.config import get_config
+        from src.agents import (
+            AgentStatus,
+            CoderOutput,
+            CodeChange,
+            FixerOutput,
+            ReviewIssue,
+            ReviewerOutput,
+            ReviewVerdict,
+            Subtask,
+        )
+
+        cfg = get_config()
+        log_dir = workspace / "logs"
+        log_dir.mkdir(exist_ok=True)
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=log_dir)
+        executor._initialize_run("run_stagnation_strategy_shift")
+        assert executor._loop is not None
+        executor._loop.start()
+
+        subtask = Subtask(
+            id="task_stagnation",
+            title="Improve calculator",
+            description="Fix calculator with safe divide implementation",
+            acceptance_criteria=["divide function exists", "tests pass"],
+            target_files=["src/calculator.py"],
+            dependencies=[],
+        )
+        node = TaskNode(id="task_stagnation", subtask=subtask)
+
+        change_a = CodeChange(
+            file_path="src/calculator.py",
+            change_type="modify",
+            description="first draft",
+            new_content="def divide(a, b):\n    return a / b\n",
+        )
+        change_b = CodeChange(
+            file_path="src/calculator.py",
+            change_type="modify",
+            description="strategy shifted draft",
+            new_content="def divide(a, b):\n    if b == 0:\n        raise ValueError('zero')\n    return a / b\n",
+        )
+
+        coder_calls = {"count": 0}
+
+        def _mock_execute_coder(_subtask, _file_contents):
+            coder_calls["count"] += 1
+            if coder_calls["count"] == 1:
+                return CoderOutput(task_id=subtask.id, status=AgentStatus.SUCCESS, changes=[change_a])
+            return CoderOutput(task_id=subtask.id, status=AgentStatus.SUCCESS, changes=[change_b])
+
+        reviewer_calls = {"count": 0}
+        issue = ReviewIssue(
+            severity="major",
+            file_path="src/calculator.py",
+            description="Division by zero not handled",
+            suggestion="Add guard for b == 0",
+        )
+
+        def _mock_execute_reviewer(_subtask, current_changes, _notes):
+            reviewer_calls["count"] += 1
+            if reviewer_calls["count"] <= 2:
+                return ReviewerOutput(
+                    task_id=subtask.id,
+                    status=AgentStatus.SUCCESS,
+                    verdict=ReviewVerdict.REQUEST_CHANGES,
+                    task_complete=False,
+                    issues=[issue],
+                    summary="Needs zero-division guard",
+                )
+            assert current_changes[0].description == "strategy shifted draft"
+            return ReviewerOutput(
+                task_id=subtask.id,
+                status=AgentStatus.SUCCESS,
+                verdict=ReviewVerdict.APPROVE,
+                task_complete=True,
+                issues=[
+                    ReviewIssue(
+                        severity="minor",
+                        file_path="src/calculator.py",
+                        description="Looks good",
+                        suggestion="Optional type hints",
+                    )
+                ],
+                summary="Approved after strategy shift",
+                criteria_met={"divide function exists": True, "tests pass": True},
+            )
+
+        def _mock_execute_fixer(current_changes, _issues, _file_contents):
+            return FixerOutput(
+                task_id=subtask.id,
+                status=AgentStatus.SUCCESS,
+                fixed_changes=current_changes,
+            )
+
+        original_coder = executor._execute_coder
+        original_reviewer = executor._execute_reviewer
+        original_fixer = executor._execute_fixer
+        original_apply = executor._apply_changes
+
+        executor._execute_coder = _mock_execute_coder  # type: ignore[assignment]
+        executor._execute_reviewer = _mock_execute_reviewer  # type: ignore[assignment]
+        executor._execute_fixer = _mock_execute_fixer  # type: ignore[assignment]
+        executor._apply_changes = lambda _changes: True  # type: ignore[assignment]
+        try:
+            ok = executor._execute_task(node)
+        finally:
+            executor._execute_coder = original_coder  # type: ignore[assignment]
+            executor._execute_reviewer = original_reviewer  # type: ignore[assignment]
+            executor._execute_fixer = original_fixer  # type: ignore[assignment]
+            executor._apply_changes = original_apply  # type: ignore[assignment]
+
+        assert ok is True
+        assert node.status == TaskStatus.COMPLETED
+        assert coder_calls["count"] >= 2
+
 
 class TestPlannerHardening:
         """Planner parsing and validation hardening tests."""
