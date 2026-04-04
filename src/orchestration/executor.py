@@ -843,6 +843,40 @@ class Executor:
             )
         except Exception:
             pass
+
+    def _record_test_learning(self, task_description: str, reviewer_output: ReviewerOutput) -> None:
+        """Persist test-related reviewer signals so future planning can learn from failures."""
+        if not self._memory_manager:
+            return
+
+        try:
+            for criterion, met in reviewer_output.criteria_met.items():
+                status = "passed" if met else "failed"
+                message = (
+                    "Acceptance criterion met"
+                    if met
+                    else "Acceptance criterion not met"
+                )
+                self._memory_manager.record_test_signal(
+                    task_description=task_description,
+                    test_name=f"criterion::{criterion}",
+                    status=status,
+                    message=message,
+                )
+
+            for issue in reviewer_output.issues:
+                issue_text = f"{issue.description} {issue.evidence} {issue.suggestion}".lower()
+                if any(token in issue_text for token in ["test", "pytest", "assert", "failing", "failure"]):
+                    self._memory_manager.record_test_signal(
+                        task_description=task_description,
+                        test_name=issue.issue_code or "reviewer_test_signal",
+                        status="failed" if issue.blocking else "error",
+                        message=issue.description or issue.evidence,
+                        file_path=issue.file_path,
+                    )
+        except Exception:
+            # Test-learning persistence must never break execution path.
+            pass
     
     def execute(
         self,
@@ -1535,6 +1569,8 @@ class Executor:
                 task_node.mark_failed(reviewer_output.error or "Review failed")
                 self._record_failure_learning(task_node.subtask.description, reviewer_output.error or "Review failed")
                 return False
+
+            self._record_test_learning(task_node.subtask.description, reviewer_output)
             
             # ============================================================
             # TERMINAL STATE CHECK: This is the authoritative stop condition

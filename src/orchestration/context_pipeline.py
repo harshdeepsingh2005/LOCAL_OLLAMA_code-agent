@@ -50,6 +50,7 @@ class ContextPacket:
     dependencies_context: str = ""
     recent_failures_context: str = ""
     recent_successes_context: str = ""
+    test_signals_context: str = ""
     semantic_links_context: str = ""
     learned_patterns_context: str = ""
     route_summary: str = ""
@@ -69,6 +70,7 @@ class ContextPacket:
             ("## Dependencies", self.dependencies_context),
             ("## Recent Failures", self.recent_failures_context),
             ("## Recent Successes", self.recent_successes_context),
+            ("## Test Signals", self.test_signals_context),
             ("## Semantic Links", self.semantic_links_context),
             ("## Documentation", self.documentation_context),
             ("## Retrieved Code", self.retrieved_code_context),
@@ -204,6 +206,7 @@ class ContextBuilder:
         retrieved = self._retrieve_code(task_description, route.module_hints)
         learned = self._memory.format_learned_patterns(task_description, max_chars=900)
         semantic_links = self._memory.format_semantic_links(task_description, max_chars=700)
+        test_signals = self._memory.format_recent_test_signals(task_description, max_chars=600)
 
         patterns = self._memory.retrieve_relevant_patterns(task_description, k_failures=3, k_successes=3)
         failures = self._format_pattern_lines(patterns.get("failures", []), kind="failure", max_chars=700)
@@ -223,6 +226,7 @@ class ContextBuilder:
             dependencies_context=dependencies,
             recent_failures_context=failures,
             recent_successes_context=successes,
+            test_signals_context=test_signals,
             semantic_links_context=semantic_links,
             learned_patterns_context=learned,
             route_summary=route_summary,

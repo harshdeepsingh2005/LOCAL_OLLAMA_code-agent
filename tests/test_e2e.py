@@ -843,6 +843,92 @@ class TestPhase5MultiWorkspace:
 
         assert "## Semantic Links" in prompt
 
+    def test_memory_records_and_formats_test_signals(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        memory.record_test_signal(
+            task_description="Fix divide behavior",
+            test_name="tests/test_calculator.py::test_divide_by_zero",
+            status="failed",
+            message="AssertionError: ValueError not raised",
+            file_path="tests/test_calculator.py",
+        )
+        memory.record_test_signal(
+            task_description="Fix divide behavior",
+            test_name="tests/test_calculator.py::test_divide_by_zero",
+            status="failed",
+            message="AssertionError: ValueError not raised",
+            file_path="tests/test_calculator.py",
+        )
+
+        data = memory._load_memory(memory._project_memory_file)
+        signals = data.get("test_signals", [])
+        assert len(signals) == 1
+        assert signals[0]["frequency"] >= 2
+
+        block = memory.format_recent_test_signals("Fix divide behavior", max_chars=300)
+        assert "FAILED" in block
+        assert "test_divide_by_zero" in block
+
+    def test_context_builder_includes_test_signals(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.orchestration.context_pipeline import ContextBuilder, TaskRoute, TaskDomain
+
+        memory = MemoryManager(workspace)
+        memory.record_test_signal(
+            task_description="Fix router auth regression",
+            test_name="tests/test_auth.py::test_login_requires_token",
+            status="failed",
+            message="Expected 401 got 200",
+            file_path="tests/test_auth.py",
+        )
+
+        builder = ContextBuilder(workspace_root=workspace, memory_manager=memory)
+        packet = builder.build("Fix router auth regression", TaskRoute(domain=TaskDomain.BACKEND))
+        prompt = packet.to_prompt_context(max_chars=1500)
+
+        assert "## Test Signals" in prompt
+        assert "test_login_requires_token" in prompt
+
+    def test_executor_records_test_learning_from_reviewer_output(self, workspace):
+        from src.config import get_config
+        from src.orchestration.executor import Executor
+        from src.agents import ReviewerOutput, ReviewIssue, AgentStatus, ReviewVerdict
+
+        cfg = get_config()
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=workspace / "logs")
+        executor._initialize_run("run_test_learning")
+        assert executor._memory_manager is not None
+
+        reviewer_output = ReviewerOutput(
+            task_id="t1",
+            status=AgentStatus.SUCCESS,
+            verdict=ReviewVerdict.REQUEST_CHANGES,
+            task_complete=False,
+            criteria_met={"tests pass": False, "api contract": True},
+            issues=[
+                ReviewIssue(
+                    severity="major",
+                    file_path="tests/test_api.py",
+                    description="failing test due to changed response shape",
+                    suggestion="update serializer",
+                    issue_code="TEST_FAIL_SHAPE",
+                    evidence="pytest failure in test_api.py",
+                    blocking=True,
+                )
+            ],
+        )
+
+        executor._record_test_learning("Fix API response shape", reviewer_output)
+
+        data = executor._memory_manager._load_memory(executor._memory_manager._project_memory_file)
+        signals = data.get("test_signals", [])
+        assert len(signals) >= 2
+        joined = "\n".join(str(s.get("test_name", "")) for s in signals)
+        assert "criterion::tests pass" in joined
+        assert "TEST_FAIL_SHAPE" in joined
+
     def test_planning_tool_calls_execute_before_final_plan(self, workspace):
         """Planner tool calls should be executed and planning should continue to subtasks."""
         from src.orchestration.executor import Executor

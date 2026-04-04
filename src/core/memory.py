@@ -94,6 +94,7 @@ class MemoryManager:
             "failure_patterns": [],
             "success_patterns": [],
             "task_outcomes": [],
+            "test_signals": [],
             "semantic_graph": {
                 "nodes": [],
                 "edges": [],
@@ -825,6 +826,101 @@ class MemoryManager:
             "failures": failures[: max(1, k_failures)],
             "successes": successes[: max(1, k_successes)],
         }
+
+    def record_test_signal(
+        self,
+        *,
+        task_description: str,
+        test_name: str,
+        status: str,
+        message: str = "",
+        file_path: str = "",
+    ) -> str:
+        """Persist a normalized test signal for future planning/review grounding."""
+        data = self._load_memory(self._project_memory_file)
+        signals = list(data.get("test_signals", []))
+
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"passed", "failed", "error", "skipped"}:
+            normalized_status = "failed"
+
+        signature = self._stable_hash(
+            f"{test_name.strip().lower()}::{normalized_status}::{file_path.strip().lower()}"
+        )
+        now = self._now_iso()
+
+        matched = None
+        for idx, signal in enumerate(signals):
+            if str(signal.get("signature", "")) == signature:
+                matched = idx
+                break
+
+        if matched is None:
+            signals.append(
+                {
+                    "signature": signature,
+                    "task": task_description[:200],
+                    "test_name": test_name[:160],
+                    "status": normalized_status,
+                    "message": message[:280],
+                    "file_path": file_path[:220],
+                    "frequency": 1,
+                    "created_at": now,
+                    "last_seen_at": now,
+                }
+            )
+        else:
+            existing = signals[matched]
+            existing["frequency"] = int(existing.get("frequency", 1)) + 1
+            existing["last_seen_at"] = now
+            if message:
+                existing["message"] = message[:280]
+            if file_path:
+                existing["file_path"] = file_path[:220]
+            signals[matched] = existing
+
+        data["test_signals"] = signals[-300:]
+        self._save_memory(self._project_memory_file, data)
+        return ActionStatus.SUCCESS
+
+    def format_recent_test_signals(self, task_description: str, max_chars: int = 700) -> str:
+        """Render relevant recent test signals to guide planner/reviewer decisions."""
+        data = self._load_memory(self._project_memory_file)
+        signals = list(data.get("test_signals", []))
+        if not signals:
+            return ""
+
+        task_tokens = self._tokenize(task_description)
+
+        def _score(signal: dict[str, Any]) -> float:
+            signal_text = " ".join(
+                [
+                    str(signal.get("task", "")),
+                    str(signal.get("test_name", "")),
+                    str(signal.get("message", "")),
+                    str(signal.get("file_path", "")),
+                ]
+            )
+            similarity = self._jaccard(task_tokens, self._tokenize(signal_text))
+            freq = self._frequency_norm(int(signal.get("frequency", 1)))
+            recency = self._recency_decay(str(signal.get("last_seen_at", "")), half_life_days=10.0)
+            fail_boost = 0.2 if str(signal.get("status", "")).lower() in {"failed", "error"} else 0.05
+            return (0.5 * similarity) + (0.2 * freq) + (0.2 * recency) + fail_boost
+
+        ranked = sorted(signals, key=_score, reverse=True)[:5]
+        lines = []
+        for signal in ranked:
+            status = str(signal.get("status", "failed")).upper()
+            test_name = str(signal.get("test_name", "unnamed_test"))
+            message = str(signal.get("message", "")).strip()
+            file_path = str(signal.get("file_path", "")).strip()
+            detail = message or file_path or "No details"
+            lines.append(f"[{status}] {test_name} — {detail}")
+
+        block = "\n".join(lines).strip()
+        if len(block) <= max_chars:
+            return block
+        return block[: max_chars - 20].rstrip() + "\n... [truncated]"
 
     def format_learned_patterns(self, task_description: str, max_chars: int = 1500) -> str:
         retrieved = self.retrieve_relevant_patterns(task_description)
