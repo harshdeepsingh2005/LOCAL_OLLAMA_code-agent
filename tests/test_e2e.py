@@ -441,6 +441,29 @@ class TestToolMemoryOrchestrationIntegration:
         )
         assert "MCP tool error" in call_result
 
+    def test_tool_executor_records_tool_signals(self, workspace):
+        """Tool executor should persist per-tool success/failure signals for adaptive selection."""
+        from src.core.memory import MemoryManager
+        from src.core.agent_tools import ToolExecutor
+        from src.agents.base import ToolCall
+
+        memory = MemoryManager(workspace)
+        tool_executor = ToolExecutor(memory_manager=memory, workspace_root=str(workspace), run_id="run_tool_signals")
+
+        _ = tool_executor.execute_call(
+            ToolCall(tool_name="read_memory", arguments={"task_description": "inspect memory"})
+        )
+        _ = tool_executor.execute_call(
+            ToolCall(tool_name="not_registered_tool", arguments={"task_description": "force failure"})
+        )
+
+        data = memory._load_memory(memory._project_memory_file)
+        signals = data.get("tool_signals", [])
+        names = {str(s.get("tool_name", "")) for s in signals}
+
+        assert "read_memory" in names
+        assert "not_registered_tool" in names
+
 
 class TestPhase5PluginArchitecture:
     """Phase 5.1 plugin registry and dispatch checks."""
@@ -890,6 +913,53 @@ class TestPhase5MultiWorkspace:
 
         assert "## Test Signals" in prompt
         assert "test_login_requires_token" in prompt
+
+    def test_memory_records_tool_performance_signals(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        memory.record_tool_signal(
+            task_description="Inspect codebase",
+            tool_name="grep_search",
+            success=True,
+            duration_ms=120.0,
+        )
+        memory.record_tool_signal(
+            task_description="Inspect codebase",
+            tool_name="grep_search",
+            success=False,
+            duration_ms=180.0,
+            error_message="timeout",
+        )
+
+        data = memory._load_memory(memory._project_memory_file)
+        signals = data.get("tool_signals", [])
+        assert len(signals) == 1
+        assert signals[0]["success_count"] == 1
+        assert signals[0]["failure_count"] == 1
+
+        summary = memory.format_tool_performance_signals("inspect codebase", max_chars=260)
+        assert "grep_search" in summary
+        assert "success_rate" in summary
+
+    def test_context_builder_includes_tool_performance_signals(self, workspace):
+        from src.core.memory import MemoryManager
+        from src.orchestration.context_pipeline import ContextBuilder, TaskRoute, TaskDomain
+
+        memory = MemoryManager(workspace)
+        memory.record_tool_signal(
+            task_description="Find API routes",
+            tool_name="semantic_search",
+            success=True,
+            duration_ms=90.0,
+        )
+
+        builder = ContextBuilder(workspace_root=workspace, memory_manager=memory)
+        packet = builder.build("Find API routes", TaskRoute(domain=TaskDomain.BACKEND))
+        prompt = packet.to_prompt_context(max_chars=1600)
+
+        assert "## Tool Performance" in prompt
+        assert "semantic_search" in prompt
 
     def test_executor_records_test_learning_from_reviewer_output(self, workspace):
         from src.config import get_config

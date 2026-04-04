@@ -39,6 +39,7 @@ HITL / safety (Feature 3) is enforced transparently inside run_command.
 from __future__ import annotations
 
 import structlog
+import time
 from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
@@ -318,18 +319,36 @@ class ToolExecutor:
         """Execute a tool call and return its string result."""
         logger.info("tool_call", tool=call.tool_name)
         args = call.arguments or {}
+        started = time.perf_counter()
+
+        def _record(success: bool, error_message: str = "") -> None:
+            try:
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                self.memory.record_tool_signal(
+                    task_description=str(args.get("task_description", "")) or f"tool:{call.tool_name}",
+                    tool_name=call.tool_name,
+                    success=success,
+                    duration_ms=duration_ms,
+                    error_message=error_message,
+                )
+            except Exception:
+                # Tool telemetry should never block execution.
+                pass
 
         try:
             plugin = self._registry.resolve(call.tool_name)
         except ToolResolutionError:
+            _record(False, "unknown_tool")
             return f"Error: Unknown tool '{call.tool_name}'."
 
         valid, validation_error = plugin.validate(args)
         if not valid:
+            _record(False, validation_error or "validation_error")
             return f"Error: {validation_error or 'Invalid arguments'}"
 
         profile_allowed, profile_reason = self._policy_profile.validate_tool_call(call.tool_name)
         if not profile_allowed:
+            _record(False, profile_reason or "policy_blocked")
             return f"Error: Policy blocked tool '{call.tool_name}': {profile_reason}"
 
         if not self._policy_profile.file_write_permissions and call.tool_name in {
@@ -337,6 +356,7 @@ class ToolExecutor:
             "replace_string",
             "delete_file",
         }:
+            _record(False, "read_only_policy")
             return (
                 f"Error: Policy blocked tool '{call.tool_name}': "
                 f"profile '{self._policy_profile.name}' is read-only"
@@ -349,20 +369,25 @@ class ToolExecutor:
         )
         allowed, policy_error = plugin.policy_check(context, args)
         if not allowed:
+            _record(False, policy_error or "policy_check_failed")
             return f"Error: Policy blocked tool '{call.tool_name}': {policy_error}"
 
         try:
             result = plugin.execute(args)
             if not isinstance(result, str):
+                _record(False, "contract_violation_non_string")
                 return (
                     f"Error: contract_violation for tool '{call.tool_name}': "
                     "plugin execute() must return a string"
                 )
+            _record(True)
             return result
         except KeyError as e:
+            _record(False, f"missing_required_argument:{e}")
             return f"Error: Missing required argument {e} for tool '{call.tool_name}'."
         except Exception as e:
             logger.error("tool_error", tool=call.tool_name, error=str(e))
+            _record(False, str(e))
             return f"Error executing '{call.tool_name}': {e}"
 
     def _execute_read_file(self, arguments: Dict[str, Any]) -> str:

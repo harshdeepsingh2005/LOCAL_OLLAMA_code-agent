@@ -95,6 +95,7 @@ class MemoryManager:
             "success_patterns": [],
             "task_outcomes": [],
             "test_signals": [],
+            "tool_signals": [],
             "semantic_graph": {
                 "nodes": [],
                 "edges": [],
@@ -916,6 +917,100 @@ class MemoryManager:
             file_path = str(signal.get("file_path", "")).strip()
             detail = message or file_path or "No details"
             lines.append(f"[{status}] {test_name} — {detail}")
+
+        block = "\n".join(lines).strip()
+        if len(block) <= max_chars:
+            return block
+        return block[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    def record_tool_signal(
+        self,
+        *,
+        task_description: str,
+        tool_name: str,
+        success: bool,
+        duration_ms: float,
+        error_message: str = "",
+    ) -> str:
+        """Persist tool execution outcomes for adaptive tool selection."""
+        data = self._load_memory(self._project_memory_file)
+        signals = list(data.get("tool_signals", []))
+
+        signature = self._stable_hash(tool_name.strip().lower())
+        now = self._now_iso()
+        matched = None
+        for idx, signal in enumerate(signals):
+            if str(signal.get("signature", "")) == signature:
+                matched = idx
+                break
+
+        if matched is None:
+            signals.append(
+                {
+                    "signature": signature,
+                    "tool_name": tool_name[:120],
+                    "success_count": 1 if success else 0,
+                    "failure_count": 0 if success else 1,
+                    "avg_duration_ms": max(0.0, float(duration_ms)),
+                    "last_error": (error_message or "")[:220],
+                    "last_task": task_description[:200],
+                    "created_at": now,
+                    "last_seen_at": now,
+                }
+            )
+        else:
+            existing = signals[matched]
+            success_count = int(existing.get("success_count", 0)) + (1 if success else 0)
+            failure_count = int(existing.get("failure_count", 0)) + (0 if success else 1)
+            total_runs = max(1, success_count + failure_count)
+            prev_avg = float(existing.get("avg_duration_ms", 0.0))
+            existing["avg_duration_ms"] = ((prev_avg * (total_runs - 1)) + max(0.0, float(duration_ms))) / total_runs
+            existing["success_count"] = success_count
+            existing["failure_count"] = failure_count
+            existing["last_seen_at"] = now
+            existing["last_task"] = task_description[:200]
+            if error_message:
+                existing["last_error"] = error_message[:220]
+            signals[matched] = existing
+
+        data["tool_signals"] = signals[-200:]
+        self._save_memory(self._project_memory_file, data)
+        return ActionStatus.SUCCESS
+
+    def format_tool_performance_signals(self, task_description: str, max_chars: int = 600) -> str:
+        """Render relevant tool performance history for planner/coder grounding."""
+        data = self._load_memory(self._project_memory_file)
+        signals = list(data.get("tool_signals", []))
+        if not signals:
+            return ""
+
+        task_tokens = self._tokenize(task_description)
+
+        def _score(signal: dict[str, Any]) -> float:
+            success_count = int(signal.get("success_count", 0))
+            failure_count = int(signal.get("failure_count", 0))
+            total = max(1, success_count + failure_count)
+            success_rate = success_count / total
+            avg_duration_ms = float(signal.get("avg_duration_ms", 0.0))
+            speed_bonus = 1.0 / (1.0 + (avg_duration_ms / 1500.0))
+            context_similarity = self._jaccard(
+                task_tokens,
+                self._tokenize(str(signal.get("last_task", "")) + " " + str(signal.get("tool_name", ""))),
+            )
+            return (0.45 * success_rate) + (0.2 * speed_bonus) + (0.35 * context_similarity)
+
+        ranked = sorted(signals, key=_score, reverse=True)[:6]
+        lines: list[str] = []
+        for signal in ranked:
+            success_count = int(signal.get("success_count", 0))
+            failure_count = int(signal.get("failure_count", 0))
+            total = max(1, success_count + failure_count)
+            success_rate = success_count / total
+            avg_duration_ms = float(signal.get("avg_duration_ms", 0.0))
+            tool_name = str(signal.get("tool_name", "unknown_tool"))
+            lines.append(
+                f"{tool_name}: success_rate={success_rate:.2f}, avg_ms={avg_duration_ms:.0f}, runs={total}"
+            )
 
         block = "\n".join(lines).strip()
         if len(block) <= max_chars:
