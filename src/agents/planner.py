@@ -52,6 +52,8 @@ class PlannerSubtaskSchema(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     tool_plan: PlannerSubtaskToolPlanSchema | None = None
     estimated_complexity: str = Field(default="medium")
+    estimated_iterations: int | None = None
+    fallback_strategy: str | None = None
 
 
 class PlannerToolCallSchema(BaseModel):
@@ -172,7 +174,9 @@ You MUST respond with a valid JSON object in this exact format:
                     }
                 ]
             },
-            "estimated_complexity": "low|medium|high"
+            "estimated_complexity": "low|medium|high",
+            "estimated_iterations": 1,
+            "fallback_strategy": "targeted_replan|evidence_gather_then_retry|scope_reduce"
         }
     ],
     "identified_risks": ["Risk 1", "Risk 2"],
@@ -343,6 +347,14 @@ You MUST respond with a valid JSON object in this exact format:
                     dependencies=list(st.dependencies),
                     tool_plan=self._convert_tool_plan(getattr(st, "tool_plan", None)),
                     estimated_complexity=st.estimated_complexity,
+                    estimated_iterations=self._normalize_estimated_iterations(
+                        st.estimated_iterations,
+                        st.estimated_complexity,
+                    ),
+                    fallback_strategy=self._normalize_fallback_strategy(
+                        st.fallback_strategy,
+                        st.estimated_complexity,
+                    ),
                 )
                 for st in normalized_subtasks
             ]
@@ -449,6 +461,10 @@ You MUST respond with a valid JSON object in this exact format:
             complexity = st.estimated_complexity.lower().strip()
             if complexity not in {"low", "medium", "high"}:
                 errors.append(f"Subtask {sid} has invalid complexity: {st.estimated_complexity}")
+            if st.estimated_iterations < 1 or st.estimated_iterations > 6:
+                errors.append(f"Subtask {sid} has invalid estimated_iterations: {st.estimated_iterations}")
+            if not st.fallback_strategy.strip():
+                errors.append(f"Subtask {sid} missing fallback_strategy")
 
         return errors
 
@@ -479,6 +495,32 @@ You MUST respond with a valid JSON object in this exact format:
             score += 0.05
 
         return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _normalize_estimated_iterations(value: int | None, complexity: str) -> int:
+        """Normalize estimated iterations using explicit value or complexity-derived defaults."""
+        if isinstance(value, int):
+            return max(1, min(6, value))
+
+        normalized = complexity.strip().lower()
+        if normalized == "low":
+            return 1
+        if normalized == "high":
+            return 3
+        return 2
+
+    @staticmethod
+    def _normalize_fallback_strategy(value: str | None, complexity: str) -> str:
+        """Normalize fallback strategy and infer deterministic defaults by complexity."""
+        if value and value.strip():
+            return value.strip()[:120]
+
+        normalized = complexity.strip().lower()
+        if normalized == "high":
+            return "evidence_gather_then_retry"
+        if normalized == "low":
+            return "targeted_replan"
+        return "scope_reduce"
 
     def _convert_tool_plan(
         self,

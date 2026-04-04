@@ -1390,6 +1390,86 @@ class TestPlannerHardening:
                 assert len(output.tool_calls) == 1
                 assert output.tool_calls[0].tool_name == "list_dir"
 
+        def test_planner_subtask_defaults_iterations_and_fallback(self, workspace):
+                """Planner should infer iteration budget and fallback strategy when omitted by model."""
+                from src.agents import AgentStatus, PlannerInput
+
+                planner, ctx = self._planner_context(workspace)
+                planner_input = PlannerInput(
+                        task_id="planning",
+                        run_id="run_planner_hardening",
+                        task_description="Refactor service for better resilience",
+                        workspace_context={"relevant_files": ["src/service.py"]},
+                )
+
+                output = planner._parse_response(
+                        """```json
+                        {
+                            "plan_summary": "refactor service",
+                            "subtasks": [
+                                {
+                                    "id": "1",
+                                    "title": "Refactor service core",
+                                    "description": "Refactor core flow and error handling.",
+                                    "acceptance_criteria": ["Flow remains correct"],
+                                    "target_files": ["src/service.py"],
+                                    "dependencies": [],
+                                    "estimated_complexity": "high"
+                                }
+                            ],
+                            "tool_calls": []
+                        }
+                        ```""",
+                        planner_input,
+                        ctx,
+                )
+
+                assert output.status == AgentStatus.SUCCESS
+                assert output.subtasks
+                assert output.subtasks[0].estimated_iterations == 3
+                assert output.subtasks[0].fallback_strategy == "evidence_gather_then_retry"
+
+        def test_planner_subtask_uses_explicit_iterations_and_fallback(self, workspace):
+                """Planner should preserve explicit iteration and fallback values when provided."""
+                from src.agents import AgentStatus, PlannerInput
+
+                planner, ctx = self._planner_context(workspace)
+                planner_input = PlannerInput(
+                        task_id="planning",
+                        run_id="run_planner_hardening",
+                        task_description="Update API endpoint",
+                        workspace_context={"relevant_files": ["src/api.py"]},
+                )
+
+                output = planner._parse_response(
+                        """```json
+                        {
+                            "plan_summary": "update api",
+                            "subtasks": [
+                                {
+                                    "id": "1",
+                                    "title": "Update endpoint",
+                                    "description": "Update endpoint validation and response format.",
+                                    "acceptance_criteria": ["Response contract unchanged"],
+                                    "target_files": ["src/api.py"],
+                                    "dependencies": [],
+                                    "estimated_complexity": "medium",
+                                    "estimated_iterations": 4,
+                                    "fallback_strategy": "targeted_replan"
+                                }
+                            ],
+                            "tool_calls": []
+                        }
+                        ```""",
+                        planner_input,
+                        ctx,
+                )
+
+                assert output.status == AgentStatus.SUCCESS
+                assert output.subtasks
+                assert output.subtasks[0].estimated_iterations == 4
+                assert output.subtasks[0].fallback_strategy == "targeted_replan"
+
 
 class TestBaseAgentStability:
     """Base agent reliability controls: retries, timeout, sanitization, token management."""

@@ -172,6 +172,16 @@ class Subtask(BaseModel):
         "medium",
         description="low, medium, or high"
     )
+    estimated_iterations: int = Field(
+        1,
+        ge=1,
+        le=6,
+        description="Estimated number of implementation/review iterations",
+    )
+    fallback_strategy: str = Field(
+        "targeted_replan",
+        description="Fallback approach if first implementation attempt fails",
+    )
     
     model_config = ConfigDict(extra="forbid")
 
