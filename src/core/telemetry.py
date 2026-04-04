@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -504,6 +505,7 @@ class TelemetryCollector:
             if self._run_metrics.plan_adherence_samples > 0
             else 0.0
         )
+        actionable_insights = self._derive_actionable_insights()
         return {
             "run_id": self._run_id,
             "duration_ms": self._run_metrics.duration_ms,
@@ -522,4 +524,47 @@ class TelemetryCollector:
             "fallback_count": self._run_metrics.fallback_count,
             "plan_adherence_score": round(adherence_avg, 4),
             "events_count": len(self._events),
+            "actionable_insights": actionable_insights,
+        }
+
+    def _derive_actionable_insights(self) -> dict[str, Any]:
+        """Generate compact operational insights from recorded events."""
+        warning_contexts: list[str] = []
+        warning_types: list[str] = []
+        for event in self._events:
+            if event.event_type != EventType.WARNING:
+                continue
+            warning = str(event.data.get("warning", "")).strip()
+            if warning:
+                warning_types.append(warning)
+            context = event.data.get("context", {})
+            if isinstance(context, dict):
+                warning_contexts.extend([str(v) for v in context.values() if isinstance(v, str)])
+
+        warning_counter = Counter(warning_types)
+        top_warnings = [
+            {"warning": key, "count": count}
+            for key, count in warning_counter.most_common(5)
+        ]
+
+        stagnation_hits = warning_counter.get("fixer_stagnation_detected", 0)
+        tool_plan_violations = warning_counter.get("tool_plan_violation", 0)
+        fallback_invocations = warning_counter.get("fallback_invoked", 0)
+
+        summary_actions: list[str] = []
+        if stagnation_hits > 0:
+            summary_actions.append("Increase planner evidence depth or switch fallback strategy earlier")
+        if tool_plan_violations > 0:
+            summary_actions.append("Tighten planner tool plans to reduce unplanned tool execution")
+        if fallback_invocations > 0:
+            summary_actions.append("Audit primary tool reliability; fallback paths are frequently triggered")
+        if not summary_actions and top_warnings:
+            summary_actions.append("Review top warning categories for recurring friction points")
+
+        return {
+            "top_warnings": top_warnings,
+            "stagnation_hits": stagnation_hits,
+            "tool_plan_violations": tool_plan_violations,
+            "fallback_invocations": fallback_invocations,
+            "recommended_actions": summary_actions,
         }

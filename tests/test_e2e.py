@@ -398,6 +398,25 @@ class TestExecutorFlow:
         assert all(not t.endswith(".gitkeep") for t in targets)
         assert all(not t.startswith(".") for t in targets)
 
+    def test_telemetry_exports_actionable_insights(self, workspace):
+        """Telemetry summary should include actionable warning-derived insights."""
+        from src.core.telemetry import TelemetryCollector
+
+        log_dir = workspace / "logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = TelemetryCollector(run_id="run_insights", log_dir=log_dir, enable_console=False)
+
+        telemetry.record_warning("fixer_stagnation_detected", {"task_id": "t1"})
+        telemetry.record_warning("tool_plan_violation", {"reason": "unplanned_tool_execution"})
+        telemetry.record_warning("fallback_invoked", {"primary_tool": "grep_search"})
+        summary = telemetry.export_summary()
+
+        insights = summary.get("actionable_insights", {})
+        assert insights.get("stagnation_hits", 0) >= 1
+        assert insights.get("tool_plan_violations", 0) >= 1
+        assert insights.get("fallback_invocations", 0) >= 1
+        assert insights.get("recommended_actions")
+
 
 class TestToolMemoryOrchestrationIntegration:
     """Integration checks for tools, memory, and orchestration wiring."""
