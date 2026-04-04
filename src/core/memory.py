@@ -96,6 +96,7 @@ class MemoryManager:
             "task_outcomes": [],
             "test_signals": [],
             "tool_signals": [],
+            "meta_reflections": [],
             "semantic_graph": {
                 "nodes": [],
                 "edges": [],
@@ -1011,6 +1012,69 @@ class MemoryManager:
             lines.append(
                 f"{tool_name}: success_rate={success_rate:.2f}, avg_ms={avg_duration_ms:.0f}, runs={total}"
             )
+
+        block = "\n".join(lines).strip()
+        if len(block) <= max_chars:
+            return block
+        return block[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+    def record_meta_reflection(
+        self,
+        *,
+        task_description: str,
+        success: bool,
+        termination_reason: str,
+        diagnosis: str,
+        priority: str,
+        strategy_updates: list[str],
+        confidence: float,
+    ) -> str:
+        """Persist post-run reflection signals for future planning improvements."""
+        data = self._load_memory(self._project_memory_file)
+        reflections = list(data.get("meta_reflections", []))
+        reflections.append(
+            {
+                "task": task_description[:200],
+                "success": bool(success),
+                "termination_reason": termination_reason[:100],
+                "diagnosis": diagnosis[:240],
+                "priority": priority[:32],
+                "strategy_updates": [str(item)[:180] for item in (strategy_updates or [])[:8]],
+                "confidence": max(0.0, min(1.0, float(confidence))),
+                "timestamp": self._now_iso(),
+            }
+        )
+        data["meta_reflections"] = reflections[-120:]
+        self._save_memory(self._project_memory_file, data)
+        return ActionStatus.SUCCESS
+
+    def format_meta_reflections(self, task_description: str, max_chars: int = 700) -> str:
+        """Render relevant meta-reflections as strategic guidance."""
+        data = self._load_memory(self._project_memory_file)
+        reflections = list(data.get("meta_reflections", []))
+        if not reflections:
+            return ""
+
+        task_tokens = self._tokenize(task_description)
+
+        def _score(item: dict[str, Any]) -> float:
+            overlap = self._jaccard(
+                task_tokens,
+                self._tokenize(str(item.get("task", "")) + " " + str(item.get("diagnosis", ""))),
+            )
+            confidence = float(item.get("confidence", 0.0))
+            recency = 0.2 if str(item.get("timestamp", "")) else 0.0
+            return (0.6 * overlap) + (0.3 * confidence) + recency
+
+        ranked = sorted(reflections, key=_score, reverse=True)[:4]
+        lines = ["## Meta Reflections"]
+        for item in ranked:
+            diagnosis = str(item.get("diagnosis", "")).strip()
+            priority = str(item.get("priority", "medium"))
+            updates = list(item.get("strategy_updates", []))[:2]
+            lines.append(f"- {priority}: {diagnosis}")
+            for update in updates:
+                lines.append(f"  - action: {update}")
 
         block = "\n".join(lines).strip()
         if len(block) <= max_chars:

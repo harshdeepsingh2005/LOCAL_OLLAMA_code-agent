@@ -41,6 +41,7 @@ from src.orchestration.context_pipeline import (
     TaskRouter,
     ValidationLayer,
 )
+from src.orchestration.meta_agent import MetaAgentReflector, MetaReflection
 from src.orchestration.workspace_manager import WorkspaceContext, WorkspaceManager
 
 __all__ = [
@@ -75,6 +76,8 @@ __all__ = [
     "ContextPacket",
     "ContextBuilder",
     "ValidationLayer",
+    "MetaAgentReflector",
+    "MetaReflection",
     # Multi-workspace orchestration
     "WorkspaceManager",
     "WorkspaceContext",

@@ -78,6 +78,7 @@ from src.orchestration.context_pipeline import (
     TaskRouter,
     ValidationLayer,
 )
+from src.orchestration.meta_agent import MetaAgentReflector
 from src.orchestration.rollback import Checkpoint, RollbackManager
 from src.orchestration.task_graph import TaskGraph, TaskNode, TaskStatus
 
@@ -203,6 +204,7 @@ class Executor:
         self._task_router = TaskRouter()
         self._validation_layer = ValidationLayer()
         self._context_builder: ContextBuilder | None = None
+        self._meta_reflector = MetaAgentReflector()
         self._active_route: TaskRoute | None = None
         self._active_context_packet: ContextPacket | None = None
         self._execution_policy = ExecutionPolicy(
@@ -1051,6 +1053,28 @@ class Executor:
                     success=result.success,
                     error=result.error,
                 )
+                try:
+                    telemetry_summary = self._telemetry.export_summary()
+                    reflection = self._meta_reflector.reflect(
+                        task_description=task_description,
+                        success=result.success,
+                        termination_reason=result.termination_reason,
+                        iterations=result.iterations,
+                        telemetry_summary=telemetry_summary,
+                        policy_profile_name=self._policy_profile.name,
+                    )
+                    self._memory_manager.record_meta_reflection(
+                        task_description=task_description,
+                        success=result.success,
+                        termination_reason=result.termination_reason,
+                        diagnosis=reflection.diagnosis,
+                        priority=reflection.priority,
+                        strategy_updates=reflection.strategy_updates,
+                        confidence=reflection.confidence,
+                    )
+                except Exception:
+                    # Reflection recording must not fail the execution pipeline.
+                    pass
             
             # Cleanup - DON'T close LLM client if we might continue
             if self._llm_client and not result.needs_continuation:
