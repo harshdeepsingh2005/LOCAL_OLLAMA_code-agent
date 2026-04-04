@@ -57,6 +57,11 @@ class ReviewerResponseSchema(BaseModel):
     issues: list[ReviewerIssueSchema] = Field(default_factory=list)
     strengths: list[str] = Field(default_factory=list)
     criteria_met: dict[str, bool] = Field(default_factory=dict)
+    correctness_score: float | None = None
+    maintainability_score: float | None = None
+    risk_score: float | None = None
+    confidence_score: float | None = None
+    potential_breakages: list[str] = Field(default_factory=list)
 
 
 class ReviewerAgent(BaseAgent[ReviewerInput, ReviewerOutput]):
@@ -108,6 +113,13 @@ You MUST respond with a valid JSON object in this exact format:
         }
     ],
     "strengths": ["What was done well"],
+    "correctness_score": 0.0,
+    "maintainability_score": 0.0,
+    "risk_score": 0.0,
+    "confidence_score": 0.0,
+    "potential_breakages": [
+        "What could break later in edge conditions"
+    ],
     "criteria_met": {
         "Criterion 1": true,
         "Criterion 2": false
@@ -136,6 +148,13 @@ You MUST respond with a valid JSON object in this exact format:
 - major: Bugs, missing functionality, significant design issues
 - minor: Code style, minor inefficiencies, small improvements
 - suggestion: Nice-to-have improvements, not required
+
+## Required Scoring:
+- correctness_score: 0.0-1.0 (higher is better)
+- maintainability_score: 0.0-1.0 (higher is better)
+- risk_score: 0.0-1.0 (higher means more likely breakage)
+- confidence_score: 0.0-1.0 (confidence in your assessment)
+- potential_breakages: list at least one realistic edge-case regression when risk_score > 0.4
 
 ## Rules:
 - Always cite specific line numbers when possible
@@ -293,6 +312,16 @@ You MUST respond with a valid JSON object in this exact format:
                     verdict = ReviewVerdict.REQUEST_CHANGES
 
             confidence = self._score_review_confidence(issues=issues, criteria_met=schema.criteria_met)
+            score_bundle = self._derive_quality_scores(
+                issues=issues,
+                criteria_met=schema.criteria_met,
+                correctness_score=schema.correctness_score,
+                maintainability_score=schema.maintainability_score,
+                risk_score=schema.risk_score,
+                confidence_score=schema.confidence_score,
+                confidence_fallback=confidence,
+            )
+            potential_breakages = [b.strip() for b in schema.potential_breakages if b and b.strip()][:8]
             if context.telemetry:
                 context.telemetry.record_warning(
                     "reviewer_review_validated",
@@ -300,7 +329,11 @@ You MUST respond with a valid JSON object in this exact format:
                         "issues": len(issues),
                         "verdict": verdict.value,
                         "task_complete": bool(task_complete),
-                        "confidence": round(confidence, 3),
+                        "confidence": round(score_bundle["confidence_score"], 3),
+                        "correctness_score": round(score_bundle["correctness_score"], 3),
+                        "maintainability_score": round(score_bundle["maintainability_score"], 3),
+                        "risk_score": round(score_bundle["risk_score"], 3),
+                        "potential_breakages": potential_breakages[:3],
                     },
                 )
             
@@ -312,6 +345,11 @@ You MUST respond with a valid JSON object in this exact format:
                 issues=issues,
                 summary=schema.summary,
                 strengths=list(schema.strengths),
+                correctness_score=score_bundle["correctness_score"],
+                maintainability_score=score_bundle["maintainability_score"],
+                risk_score=score_bundle["risk_score"],
+                confidence_score=score_bundle["confidence_score"],
+                potential_breakages=potential_breakages,
                 criteria_met=dict(schema.criteria_met),
             )
             
@@ -335,6 +373,41 @@ You MUST respond with a valid JSON object in this exact format:
         severe = sum(1 for i in issues if i.severity.lower() in {"critical", "major"})
         score -= min(0.35, severe * 0.12)
         return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _derive_quality_scores(
+        *,
+        issues: list[ReviewIssue],
+        criteria_met: dict[str, bool],
+        correctness_score: float | None,
+        maintainability_score: float | None,
+        risk_score: float | None,
+        confidence_score: float | None,
+        confidence_fallback: float,
+    ) -> dict[str, float]:
+        """Normalize reviewer quality scores with deterministic fallbacks."""
+        severe = sum(1 for i in issues if i.severity.lower() in {"critical", "major"})
+        minor = sum(1 for i in issues if i.severity.lower() in {"minor", "suggestion"})
+        passed = sum(1 for v in criteria_met.values() if v)
+        total = max(1, len(criteria_met))
+        criteria_ratio = passed / total
+
+        default_correctness = max(0.0, min(1.0, 0.35 + (0.5 * criteria_ratio) - (0.15 * severe)))
+        default_maintainability = max(0.0, min(1.0, 0.45 + (0.25 * criteria_ratio) - (0.08 * minor) - (0.12 * severe)))
+        default_risk = max(0.0, min(1.0, 0.15 + (0.22 * severe) + (0.08 * minor) + (0.22 * (1 - criteria_ratio))))
+        default_confidence = max(0.0, min(1.0, confidence_fallback))
+
+        def _normalize(value: float | None, fallback: float) -> float:
+            if value is None:
+                return round(fallback, 4)
+            return round(max(0.0, min(1.0, float(value))), 4)
+
+        return {
+            "correctness_score": _normalize(correctness_score, default_correctness),
+            "maintainability_score": _normalize(maintainability_score, default_maintainability),
+            "risk_score": _normalize(risk_score, default_risk),
+            "confidence_score": _normalize(confidence_score, default_confidence),
+        }
     
     def _create_error_output(
         self,

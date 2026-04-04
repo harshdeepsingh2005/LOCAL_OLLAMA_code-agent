@@ -511,15 +511,18 @@ class Executor:
         no_errors = not any(sev in {"critical", "major"} for sev in severities)
         tests_passed = bool(reviewer_output.criteria_met) and all(reviewer_output.criteria_met.values())
         risk_recorded = any(sev in {"minor", "suggestion"} for sev in severities)
+        risk_score_ok = float(getattr(reviewer_output, "risk_score", 0.5)) <= 0.65
 
         gate = {
             "no_errors": no_errors,
             "tests_passed": tests_passed,
             "risk_recorded": risk_recorded,
+            "risk_score_ok": risk_score_ok,
+            "risk_score": float(getattr(reviewer_output, "risk_score", 0.5)),
             "issue_count": len(reviewer_output.issues),
         }
         no_issues = len(reviewer_output.issues) == 0
-        return no_errors and tests_passed and (risk_recorded or no_issues), gate
+        return no_errors and tests_passed and (risk_recorded or no_issues) and risk_score_ok, gate
 
     @staticmethod
     def _build_change_fingerprint(changes: list[CodeChange]) -> str:

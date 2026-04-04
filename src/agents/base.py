@@ -319,6 +319,34 @@ class ReviewerOutput(AgentOutput):
     # Analysis
     summary: str = Field("", description="Overall assessment")
     strengths: list[str] = Field(default_factory=list)
+    correctness_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Estimated correctness confidence (0.0-1.0)",
+    )
+    maintainability_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Estimated maintainability quality (0.0-1.0)",
+    )
+    risk_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Estimated residual risk after this change (0.0-1.0)",
+    )
+    confidence_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Reviewer confidence in assessment quality (0.0-1.0)",
+    )
+    potential_breakages: list[str] = Field(
+        default_factory=list,
+        description="Edge cases or regressions likely to break later",
+    )
     
     # Acceptance criteria check
     criteria_met: dict[str, bool] = Field(

@@ -233,6 +233,7 @@ class TestExecutorFlow:
             status=AgentStatus.SUCCESS,
             task_complete=True,
             issues=[],
+            risk_score=0.2,
             criteria_met={"criterion": True},
         )
 
@@ -240,6 +241,92 @@ class TestExecutorFlow:
 
         assert allowed is True
         assert gate["no_errors"] is True
+
+    def test_verification_gate_blocks_high_risk_review(self, workspace):
+        """Verification gate should block completion when residual risk is too high."""
+        from src.orchestration.executor import Executor
+        from src.config import get_config
+        from src.agents import ReviewerOutput, AgentStatus
+
+        cfg = get_config()
+        log_dir = workspace / "logs"
+        log_dir.mkdir(exist_ok=True)
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=log_dir)
+
+        reviewer_output = ReviewerOutput(
+            task_id="t2",
+            status=AgentStatus.SUCCESS,
+            task_complete=True,
+            issues=[],
+            risk_score=0.9,
+            criteria_met={"criterion": True},
+        )
+
+        allowed, gate = executor._verification_gate(reviewer_output)
+
+        assert allowed is False
+        assert gate["risk_score_ok"] is False
+
+    def test_reviewer_parser_populates_intelligence_scores(self, workspace):
+        """Reviewer parser should map explicit scoring fields and potential breakages."""
+        from src.orchestration.executor import Executor
+        from src.config import get_config
+        from src.agents import AgentType, ReviewerInput, Subtask, AgentStatus
+
+        cfg = get_config()
+        log_dir = workspace / "logs"
+        log_dir.mkdir(exist_ok=True)
+        executor = Executor(config=cfg, workspace_root=workspace, log_dir=log_dir)
+        executor._initialize_run("run_reviewer_scoring")
+        context = executor._create_agent_context(AgentType.REVIEWER)
+
+        subtask = Subtask(
+            id="r1",
+            title="Review scoring",
+            description="Validate reviewer scores",
+            acceptance_criteria=["scores present"],
+            target_files=["src/calculator.py"],
+            dependencies=[],
+        )
+        reviewer_input = ReviewerInput(
+            task_id="r1",
+            run_id="run_reviewer_scoring",
+            subtask=subtask,
+            code_changes=[],
+        )
+
+        raw = """{
+            "verdict": "REQUEST_CHANGES",
+            "task_complete": false,
+            "summary": "Needs work",
+            "issues": [
+              {
+                "severity": "major",
+                "file_path": "src/calculator.py",
+                "description": "Edge case missing",
+                "suggestion": "Handle zero",
+                "issue_code": "REVIEW_001",
+                "acceptance_criterion_ref": "scores present",
+                "evidence": "No zero guard",
+                "blocking": true
+              }
+            ],
+            "correctness_score": 0.42,
+            "maintainability_score": 0.61,
+            "risk_score": 0.77,
+            "confidence_score": 0.83,
+            "potential_breakages": ["Division by zero in production"],
+            "criteria_met": {"scores present": false}
+        }"""
+
+        output = executor._reviewer._parse_response(raw, reviewer_input, context)
+
+        assert output.status == AgentStatus.SUCCESS
+        assert output.correctness_score == pytest.approx(0.42)
+        assert output.maintainability_score == pytest.approx(0.61)
+        assert output.risk_score == pytest.approx(0.77)
+        assert output.confidence_score == pytest.approx(0.83)
+        assert output.potential_breakages
 
     def test_apply_changes_rejects_excessive_file_surface(self, workspace):
         """Apply changes should reject modifications beyond per-cycle file limits."""
