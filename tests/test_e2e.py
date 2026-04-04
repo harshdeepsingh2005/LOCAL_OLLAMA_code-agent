@@ -559,6 +559,50 @@ class TestPhase5MultiWorkspace:
         assert len(patterns) == 1
         assert patterns[0]["frequency"] >= 2
 
+    def test_memory_learning_deduplicates_failure_alias_categories(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        data = memory._load_memory(memory._project_memory_file)
+        data["failure_patterns"] = [
+            {
+                "pattern_id": "fp_a",
+                "category": "import_error",
+                "summary": "import error in api router",
+                "root_cause": "ImportError",
+                "resolution_hint": "fix import path",
+                "tags": ["api", "import"],
+                "frequency": 1,
+                "confidence": 0.5,
+                "created_at": memory._now_iso(),
+                "last_used_at": memory._now_iso(),
+            },
+            {
+                "pattern_id": "fp_b",
+                "category": "missing_import",
+                "summary": "missing import in router api",
+                "root_cause": "ModuleNotFoundError",
+                "resolution_hint": "fix import path",
+                "tags": ["router", "import"],
+                "frequency": 1,
+                "confidence": 0.55,
+                "created_at": memory._now_iso(),
+                "last_used_at": memory._now_iso(),
+            },
+        ]
+        memory._save_memory(memory._project_memory_file, data)
+
+        memory.record_failure_pattern(
+            task_description="Fix router imports",
+            error_message="ModuleNotFoundError: missing import path",
+        )
+
+        refreshed = memory._load_memory(memory._project_memory_file)
+        patterns = refreshed["failure_patterns"]
+        assert len(patterns) == 1
+        assert patterns[0]["category"] == "missing_import"
+        assert patterns[0]["frequency"] >= 3
+
     def test_memory_learning_ranked_split_retrieval(self, workspace):
         from src.core.memory import MemoryManager
 
@@ -583,6 +627,57 @@ class TestPhase5MultiWorkspace:
         assert "failures" in retrieved and "successes" in retrieved
         assert len(retrieved["failures"]) >= 1
         assert len(retrieved["successes"]) >= 1
+
+    def test_memory_learning_deduplicates_success_pattern_aliases(self, workspace):
+        from src.core.memory import MemoryManager
+
+        memory = MemoryManager(workspace)
+        data = memory._load_memory(memory._project_memory_file)
+        data["success_patterns"] = [
+            {
+                "pattern_id": "sp_a",
+                "pattern_type": "endpoint_pattern",
+                "summary": "endpoint pattern in routes",
+                "reusable_snippet": "@router.get('/x')",
+                "tags": ["api", "router"],
+                "success_rate": 1.0,
+                "frequency": 1,
+                "confidence": 0.6,
+                "created_at": memory._now_iso(),
+                "last_used_at": memory._now_iso(),
+            },
+            {
+                "pattern_id": "sp_b",
+                "pattern_type": "api_endpoint_pattern",
+                "summary": "api endpoint pattern routes",
+                "reusable_snippet": "@router.post('/x')",
+                "tags": ["router", "fastapi"],
+                "success_rate": 1.0,
+                "frequency": 1,
+                "confidence": 0.6,
+                "created_at": memory._now_iso(),
+                "last_used_at": memory._now_iso(),
+            },
+        ]
+        memory._save_memory(memory._project_memory_file, data)
+
+        memory.record_success_patterns_from_changes(
+            changes=[
+                {
+                    "file_path": "src/routes/users.py",
+                    "change_type": "modify",
+                    "description": "add users endpoint",
+                    "new_content": "from fastapi import APIRouter\nrouter = APIRouter()\n@router.get('/users')\ndef users():\n    return []\n",
+                }
+            ],
+            task_description="Add users endpoint",
+        )
+
+        refreshed = memory._load_memory(memory._project_memory_file)
+        patterns = refreshed["success_patterns"]
+        assert len(patterns) == 1
+        assert patterns[0]["pattern_type"] == "api_endpoint_pattern"
+        assert patterns[0]["frequency"] >= 3
 
     def test_memory_learning_structured_injection_budget(self, workspace):
         from src.core.memory import MemoryManager

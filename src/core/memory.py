@@ -204,6 +204,15 @@ class MemoryManager:
     def _summary_overlap(self, a: str, b: str) -> float:
         return self._jaccard(self._tokenize(a), self._tokenize(b))
 
+    @staticmethod
+    def _summary_signature(text: str) -> str:
+        stopwords = {
+            "the", "and", "for", "with", "from", "into", "that", "this", "when",
+            "failed", "error", "issue", "fix", "task", "module", "service",
+        }
+        tokens = [t for t in re.findall(r"[a-zA-Z_]{3,}", text.lower()) if t not in stopwords]
+        return " ".join(sorted(set(tokens))[:8])
+
     def _similarity_score(self, tags_a: list[str], tags_b: list[str], summary_a: str, summary_b: str) -> float:
         tag_jaccard = self._jaccard(set(tags_a), set(tags_b))
         summary_overlap = self._summary_overlap(summary_a, summary_b)
@@ -220,21 +229,110 @@ class MemoryManager:
     ) -> int | None:
         best_idx: int | None = None
         best_score = 0.0
-        new_primary = new_tags[0] if new_tags else ""
+        canonical_kind = (
+            self._canonical_failure_category(new_kind)
+            if kind_key == "category"
+            else self._canonical_pattern_type(new_kind)
+        )
+        new_signature = self._summary_signature(new_summary)
 
         for idx, pattern in enumerate(existing_patterns):
-            if pattern.get(kind_key) != new_kind:
+            existing_kind = str(pattern.get(kind_key, ""))
+            canonical_existing = (
+                self._canonical_failure_category(existing_kind)
+                if kind_key == "category"
+                else self._canonical_pattern_type(existing_kind)
+            )
+
+            if canonical_existing != canonical_kind:
                 continue
+
             existing_tags = [str(t) for t in pattern.get("tags", [])]
-            existing_primary = existing_tags[0] if existing_tags else ""
-            if new_primary and existing_primary and new_primary != existing_primary:
-                continue
             score = self._similarity_score(existing_tags, new_tags, str(pattern.get("summary", "")), new_summary)
+            existing_signature = self._summary_signature(str(pattern.get("summary", "")))
+            if new_signature and existing_signature and new_signature == existing_signature:
+                score = max(score, 0.9)
             if score >= threshold and score > best_score:
                 best_idx = idx
                 best_score = score
 
         return best_idx
+
+    def _dedupe_patterns(
+        self,
+        patterns: list[dict[str, Any]],
+        kind_key: str,
+        threshold: float = 0.58,
+    ) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        for pattern in patterns:
+            kind = str(pattern.get(kind_key, ""))
+            canonical_kind = (
+                self._canonical_failure_category(kind)
+                if kind_key == "category"
+                else self._canonical_pattern_type(kind)
+            )
+            pattern[kind_key] = canonical_kind
+            merged = False
+
+            for existing in deduped:
+                existing_kind = str(existing.get(kind_key, ""))
+                if existing_kind != canonical_kind:
+                    continue
+
+                similarity = self._similarity_score(
+                    [str(t) for t in existing.get("tags", [])],
+                    [str(t) for t in pattern.get("tags", [])],
+                    str(existing.get("summary", "")),
+                    str(pattern.get("summary", "")),
+                )
+                existing_signature = self._summary_signature(str(existing.get("summary", "")))
+                incoming_signature = self._summary_signature(str(pattern.get("summary", "")))
+                if existing_signature == incoming_signature:
+                    similarity = max(similarity, 0.92)
+
+                existing_sig_tokens = set(existing_signature.split())
+                incoming_sig_tokens = set(incoming_signature.split())
+                key_token_overlap = len(existing_sig_tokens & incoming_sig_tokens)
+
+                tag_overlap = self._jaccard(
+                    set(str(t) for t in existing.get("tags", [])),
+                    set(str(t) for t in pattern.get("tags", [])),
+                )
+                summary_overlap = self._summary_overlap(
+                    str(existing.get("summary", "")),
+                    str(pattern.get("summary", "")),
+                )
+
+                strong_semantic_match = (
+                    (tag_overlap >= 0.25 and summary_overlap >= 0.2)
+                    or (tag_overlap >= 0.35)
+                )
+
+                if canonical_kind in {"missing_import", "missing_file"} and key_token_overlap >= 1:
+                    strong_semantic_match = True
+
+                if similarity < threshold and not strong_semantic_match:
+                    continue
+
+                existing["frequency"] = int(existing.get("frequency", 1)) + int(pattern.get("frequency", 1))
+                existing["confidence"] = self._normalize_confidence(
+                    max(float(existing.get("confidence", 0.5)), float(pattern.get("confidence", 0.5)))
+                )
+                existing["last_used_at"] = max(
+                    str(existing.get("last_used_at", "")),
+                    str(pattern.get("last_used_at", "")),
+                )
+                merged_tags = set(str(t) for t in existing.get("tags", [])) | set(str(t) for t in pattern.get("tags", []))
+                existing["tags"] = sorted(t for t in merged_tags if t)
+                merged = True
+                break
+
+            if not merged:
+                deduped.append(dict(pattern))
+
+        deduped.sort(key=lambda p: (int(p.get("frequency", 1)), str(p.get("last_used_at", ""))), reverse=True)
+        return deduped
 
     @staticmethod
     def _normalize_confidence(value: float) -> float:
@@ -555,6 +653,7 @@ class MemoryManager:
         )
 
         data["failure_patterns"] = patterns[-200:]
+        data["failure_patterns"] = self._dedupe_patterns(list(data.get("failure_patterns", [])), kind_key="category")[:200]
         data["semantic_graph"]["nodes"] = data["semantic_graph"].get("nodes", [])[-600:]
         data["semantic_graph"]["edges"] = data["semantic_graph"].get("edges", [])[-1200:]
         self._save_memory(self._project_memory_file, data)
@@ -615,6 +714,7 @@ class MemoryManager:
             )
 
         data["success_patterns"] = patterns[-200:]
+        data["success_patterns"] = self._dedupe_patterns(list(data.get("success_patterns", [])), kind_key="pattern_type")[:200]
         data["semantic_graph"]["nodes"] = data["semantic_graph"].get("nodes", [])[-600:]
         data["semantic_graph"]["edges"] = data["semantic_graph"].get("edges", [])[-1200:]
         self._save_memory(self._project_memory_file, data)
