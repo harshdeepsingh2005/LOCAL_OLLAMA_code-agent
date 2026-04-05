@@ -24,6 +24,8 @@ The objective is practical autonomy with clear operational guardrails.
 - Policy profiles: `strict`, `balanced`, `permissive`
 - Formal execution guarantees (state invariants + normalized failures)
 - Deterministic sequential multi-workspace orchestration (v1)
+- Meta-agent reflection + adaptive policy tuning loops
+- Query-aware context optimization with budgeted summarization
 
 ## Repository structure
 
@@ -82,6 +84,7 @@ Interactive commands:
 - [Safety and constraints](docs/safety_and_constraints.md)
 - [Extending the system](docs/extending_the_system.md)
 - [Testing](docs/testing.md)
+- [Release notes](docs/release-notes.md)
 - [Known issues](docs/known_issues.md)
 - [Roadmap](docs/roadmap.md)
 
