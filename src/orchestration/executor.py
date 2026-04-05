@@ -216,6 +216,9 @@ class Executor:
             for schema in TOOL_SCHEMAS
             if schema.get("name")
         }
+        self._adaptive_max_tool_steps = max(1, self._policy_profile.max_tool_steps)
+        self._adaptive_require_reason_evidence = False
+        self._adaptive_prefer_reliable_tools = False
     
     def _initialize_run(self, run_id: str | None = None) -> str:
         """Initialize components for a new run."""
@@ -396,7 +399,13 @@ class Executor:
             "Use map -> hypothesize -> verify before broad edits",
             f"Bound edits to <= {self._execution_policy.max_files_per_cycle} files per cycle",
             f"Bound edits to <= {self._execution_policy.max_lines_per_cycle} lines per cycle",
+            f"Tool-plan depth cap: {self._effective_max_tool_steps()} steps",
         ]
+
+        if self._adaptive_require_reason_evidence:
+            constraints.append("Tool-plan reasons must include evidence anchor (file/signal/trace)")
+        if self._adaptive_prefer_reliable_tools:
+            constraints.append("Prefer historically reliable tools before uncertain or fallback-heavy choices")
 
         if not fast_map:
             return constraints
@@ -628,6 +637,25 @@ class Executor:
             return True
         return tool_name.startswith("mcp_") and tool_name in self._policy_profile.allowed_tools
 
+    def _effective_max_tool_steps(self) -> int:
+        """Return adaptive tool-step budget bounded by policy profile."""
+        return max(1, min(6, int(self._adaptive_max_tool_steps)))
+
+    def _refresh_adaptive_policy(self, task_description: str) -> None:
+        """Refresh adaptive policy knobs from persisted historical outcomes."""
+        if self._memory_manager is None:
+            self._adaptive_max_tool_steps = max(1, self._policy_profile.max_tool_steps)
+            self._adaptive_require_reason_evidence = False
+            self._adaptive_prefer_reliable_tools = False
+            return
+
+        hints = self._memory_manager.derive_policy_hints(task_description)
+        adjustment = int(hints.get("max_tool_steps_adjustment", 0))
+        base = max(1, int(self._policy_profile.max_tool_steps))
+        self._adaptive_max_tool_steps = max(1, min(6, base + adjustment))
+        self._adaptive_require_reason_evidence = bool(hints.get("require_reason_evidence", False))
+        self._adaptive_prefer_reliable_tools = bool(hints.get("prefer_reliable_tools", False))
+
     def _is_tool_result_success(self, result: str) -> bool:
         """Best-effort success check for string-based tool results."""
         text = (result or "").strip().lower()
@@ -646,7 +674,7 @@ class Executor:
         if not plan:
             return names
 
-        max_steps = max(1, self._policy_profile.max_tool_steps)
+        max_steps = self._effective_max_tool_steps()
 
         def walk(step: ToolPlanStep | None, depth: int = 0) -> None:
             if not step or depth > max_steps:
@@ -667,7 +695,7 @@ class Executor:
 
         errors: list[str] = []
         steps = list(plan.steps)
-        max_steps = max(1, self._policy_profile.max_tool_steps)
+        max_steps = self._effective_max_tool_steps()
         if len(steps) > max_steps:
             errors.append(f"tool_plan has too many steps: {len(steps)} > {max_steps}")
 
@@ -679,6 +707,13 @@ class Executor:
                 errors.append(f"tool_plan references unknown tool: {step.tool}")
             if not step.reason.strip():
                 errors.append(f"tool_plan step missing reason for tool: {step.tool}")
+            elif self._adaptive_require_reason_evidence:
+                reason = step.reason.lower()
+                evidence_tokens = ("file", "signal", "trace", "test", "log", "context")
+                if not any(token in reason for token in evidence_tokens):
+                    errors.append(
+                        f"tool_plan step reason lacks evidence anchor under adaptive policy: {step.tool}"
+                    )
             if step.fallback:
                 validate_step(step.fallback, depth + 1)
 
@@ -756,7 +791,7 @@ class Executor:
         executed_tools: list[str] = []
         chunks: list[str] = []
         fallback_count = 0
-        for step in list(plan.steps)[: max(1, self._policy_profile.max_tool_steps)]:
+        for step in list(plan.steps)[: self._effective_max_tool_steps()]:
             ok, chunk, used_fallbacks = self._execute_tool_plan_step(step, executed_tools)
             chunks.append(chunk)
             fallback_count += used_fallbacks
@@ -920,6 +955,8 @@ class Executor:
             # Check LLM health
             if not self._llm_client.health_check():
                 raise ExecutionError("Ollama is not running or not accessible")
+
+            self._refresh_adaptive_policy(task_description)
 
             # Validate and route task
             validation_errors = self._validation_layer.validate_task(task_description)

@@ -1081,6 +1081,53 @@ class MemoryManager:
             return block
         return block[: max_chars - 20].rstrip() + "\n... [truncated]"
 
+    def derive_policy_hints(self, task_description: str) -> dict[str, Any]:
+        """Infer adaptive policy recommendations from historical outcomes."""
+        data = self._load_memory(self._project_memory_file)
+        reflections = list(data.get("meta_reflections", []))[-20:]
+        tool_signals = list(data.get("tool_signals", []))[-40:]
+
+        task_tokens = self._tokenize(task_description)
+        tighten_signals = 0
+        relax_signals = 0
+        high_priority_count = 0
+        for item in reflections:
+            updates = " ".join(str(v) for v in item.get("strategy_updates", []))
+            diagnosis = str(item.get("diagnosis", ""))
+            similarity = self._jaccard(task_tokens, self._tokenize(diagnosis + " " + updates))
+            weight = 1.0 + similarity
+            if str(item.get("priority", "")).lower() == "high":
+                high_priority_count += 1
+                weight += 0.3
+
+            text = updates.lower()
+            if "tighten" in text or "evidence" in text or "stagnation" in text:
+                tighten_signals += int(round(weight))
+            if "retain current strategy" in text or "stable" in diagnosis.lower():
+                relax_signals += int(round(weight))
+
+        unreliable_tools = 0
+        for signal in tool_signals:
+            success_count = int(signal.get("success_count", 0))
+            failure_count = int(signal.get("failure_count", 0))
+            total = success_count + failure_count
+            if total < 3:
+                continue
+            if (success_count / max(1, total)) < 0.4:
+                unreliable_tools += 1
+
+        step_adjustment = 0
+        if tighten_signals > relax_signals + 1:
+            step_adjustment = -1
+        elif relax_signals > tighten_signals + 2:
+            step_adjustment = 1
+
+        return {
+            "max_tool_steps_adjustment": step_adjustment,
+            "require_reason_evidence": tighten_signals >= 2 or high_priority_count >= 2,
+            "prefer_reliable_tools": unreliable_tools >= 2,
+        }
+
     def format_learned_patterns(self, task_description: str, max_chars: int = 1500) -> str:
         retrieved = self.retrieve_relevant_patterns(task_description)
         failures = retrieved.get("failures", [])
