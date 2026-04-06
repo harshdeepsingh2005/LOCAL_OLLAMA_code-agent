@@ -207,6 +207,7 @@ class Executor:
         self._meta_reflector = MetaAgentReflector()
         self._active_route: TaskRoute | None = None
         self._active_context_packet: ContextPacket | None = None
+        self._recent_reviewer_risk_notes: deque[str] = deque(maxlen=8)
         self._execution_policy = ExecutionPolicy(
             max_files_per_cycle=max(1, self._config.limits.files.max_per_task),
             max_lines_per_cycle=max(100, self._config.limits.files.max_total_lines_changed),
@@ -406,6 +407,10 @@ class Executor:
             constraints.append("Tool-plan reasons must include evidence anchor (file/signal/trace)")
         if self._adaptive_prefer_reliable_tools:
             constraints.append("Prefer historically reliable tools before uncertain or fallback-heavy choices")
+        if self._recent_reviewer_risk_notes:
+            constraints.append("Address prior reviewer-identified breakage risks before introducing new edits")
+            for note in list(self._recent_reviewer_risk_notes)[-3:]:
+                constraints.append(f"Reviewer risk signal: {note}")
 
         if not fast_map:
             return constraints
@@ -422,6 +427,32 @@ class Executor:
             constraints.append("Confidence sufficient: proceed with minimal patch path")
 
         return constraints
+
+    def _ingest_reviewer_risk_signals(self, reviewer_output: ReviewerOutput, task_id: str) -> None:
+        """Capture reviewer risk notes to guide subsequent planning passes."""
+        notes: list[str] = []
+        if reviewer_output.potential_breakages:
+            notes.extend([str(item).strip() for item in reviewer_output.potential_breakages if str(item).strip()])
+        if float(getattr(reviewer_output, "risk_score", 0.0)) >= 0.55:
+            summary = str(getattr(reviewer_output, "summary", "")).strip()
+            if summary:
+                notes.append(f"high_risk_summary: {summary[:180]}")
+
+        if not notes:
+            return
+
+        for note in notes[:4]:
+            self._recent_reviewer_risk_notes.append(note[:220])
+
+        if self._telemetry:
+            self._telemetry.record_warning(
+                "reviewer_risk_signal_captured",
+                context={
+                    "task_id": task_id,
+                    "captured": len(notes[:4]),
+                    "risk_score": float(getattr(reviewer_output, "risk_score", 0.0)),
+                },
+            )
 
     def _build_fallback_plan(
         self,
@@ -1677,6 +1708,7 @@ class Executor:
                 return False
 
             self._record_test_learning(task_node.subtask.description, reviewer_output)
+            self._ingest_reviewer_risk_signals(reviewer_output, task_node.id)
             
             # ============================================================
             # TERMINAL STATE CHECK: This is the authoritative stop condition
