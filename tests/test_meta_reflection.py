@@ -72,3 +72,21 @@ def test_memory_filters_low_signal_reflections_from_render(tmp_path):
     rendered = memory.format_meta_reflections("planner evidence")
     assert "## Meta Reflections" in rendered
     assert "tighten planner tool-plan precision" in rendered
+
+
+def test_memory_returns_recent_quality_reflections(tmp_path):
+    memory = MemoryManager(workspace_root=tmp_path)
+    memory.record_meta_reflection(
+        task_description="optimize auth flow",
+        success=False,
+        termination_reason="fatal_error",
+        diagnosis="Run failed due to risk and stagnation signals",
+        priority="high",
+        strategy_updates=["increase early strategy-shift sensitivity for fixer loop"],
+        confidence=0.88,
+    )
+
+    rows = memory.get_recent_meta_reflections(limit=3, min_quality=0.35)
+    assert rows
+    assert rows[0]["quality_score"] >= 0.35
+    assert "diagnosis" in rows[0]

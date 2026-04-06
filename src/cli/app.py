@@ -20,11 +20,12 @@ from src.cli.display import Display
 from src.cli.session import PendingChange, Session, SessionConfig, SessionState
 from src.config import Configuration, get_config
 from src.core import DiffEngine, FileGuard, FileGuardPolicy, LLMClient
+from src.core.memory import MemoryManager
 from src.orchestration import Executor, RollbackManager
 from src.orchestration.workspace_manager import WorkspaceManager
 
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 
 class AgentCLI:
@@ -649,8 +650,49 @@ class AgentCLI:
             self.add_workspace(str(payload))
         elif action == "clear_workspaces":
             self.clear_workspaces()
+        elif action == "get_adaptive_status":
+            return self._get_adaptive_status()
         else:
             raise ValueError(f"Unknown project callback action: {action}")
+
+    def _get_adaptive_status(self) -> dict[str, Any]:
+        """Return operator-visible adaptive policy and reflection state."""
+        task_hint = ""
+        for message in reversed(self.session.messages):
+            if message.role == "user" and message.content.strip():
+                task_hint = message.content.strip()
+                break
+
+        memory = MemoryManager(self.workspace)
+        hints = memory.derive_policy_hints(task_hint or "general")
+        reflections = memory.get_recent_meta_reflections(limit=4, min_quality=0.35)
+
+        runtime = {
+            "effective_max_tool_steps": "n/a",
+            "require_reason_evidence": "n/a",
+            "prefer_reliable_tools": "n/a",
+        }
+        if self._executor is not None:
+            runtime = {
+                "effective_max_tool_steps": int(getattr(self._executor, "_adaptive_max_tool_steps", 0)),
+                "require_reason_evidence": bool(
+                    getattr(self._executor, "_adaptive_require_reason_evidence", False)
+                ),
+                "prefer_reliable_tools": bool(
+                    getattr(self._executor, "_adaptive_prefer_reliable_tools", False)
+                ),
+            }
+
+        return {
+            "policy_profile": self._policy_profile,
+            "project_mode": self._project_mode,
+            "executor_active": self._executor is not None,
+            **runtime,
+            "hint_max_tool_steps_adjustment": int(hints.get("max_tool_steps_adjustment", 0)),
+            "hint_require_reason_evidence": bool(hints.get("require_reason_evidence", False)),
+            "hint_prefer_reliable_tools": bool(hints.get("prefer_reliable_tools", False)),
+            "recent_meta_reflections": reflections,
+        }
     
     def _ask_continue(self) -> bool:
         """

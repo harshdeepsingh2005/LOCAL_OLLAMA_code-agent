@@ -44,6 +44,7 @@ class CommandHandler:
         "/checkpoints": "List available checkpoints",
         "/project": "Enable/disable project mode [on|off]",
         "/profile": "Get/set policy profile [strict|balanced|permissive]",
+        "/adaptive": "Show adaptive policy + reflection status",
         "/workspaces": "Manage multi-workspace list [list|add|clear]",
     }
     
@@ -127,6 +128,7 @@ class CommandHandler:
             "/checkpoints": self._cmd_checkpoints,
             "/project": self._cmd_project,
             "/profile": self._cmd_profile,
+            "/adaptive": self._cmd_adaptive,
             "/workspaces": self._cmd_workspaces,
         }
         
@@ -612,6 +614,45 @@ class CommandHandler:
             return
 
         self.display.info("Usage: /workspaces [list|add <path>|clear]")
+
+    def _cmd_adaptive(self, args: list[str]) -> None:
+        """Show adaptive policy and reflection state for operator visibility."""
+        if not hasattr(self, "_app_callback"):
+            self.display.error("Adaptive status not available in this context")
+            return
+
+        status = self._app_callback("get_adaptive_status")
+        if not isinstance(status, dict):
+            self.display.error("Adaptive status unavailable")
+            return
+
+        self.display.subheader("Adaptive Orchestration Status")
+        self.display.key_value(
+            {
+                "Policy profile": status.get("policy_profile", "unknown"),
+                "Project mode": status.get("project_mode", False),
+                "Executor active": status.get("executor_active", False),
+                "Effective tool-step cap": status.get("effective_max_tool_steps", "n/a"),
+                "Require reason evidence": status.get("require_reason_evidence", "n/a"),
+                "Prefer reliable tools": status.get("prefer_reliable_tools", "n/a"),
+                "Hint step adjustment": status.get("hint_max_tool_steps_adjustment", 0),
+            },
+            title="Current Adaptive Policy",
+        )
+
+        reflections = status.get("recent_meta_reflections", [])
+        if not reflections:
+            self.display.info("No recent high-quality reflections available yet")
+            return
+
+        self.display.subheader("Recent Meta Reflections")
+        for idx, item in enumerate(reflections, 1):
+            priority = str(item.get("priority", "medium"))
+            quality = float(item.get("quality_score", 0.0))
+            diagnosis = str(item.get("diagnosis", "")).strip()[:180]
+            self.display.raw(f"  {idx}. [{priority}] q={quality:.2f} — {diagnosis}")
+            for update in list(item.get("strategy_updates", []))[:2]:
+                self.display.raw(f"     - {update}")
     
     def set_app_callback(self, callback: Callable[..., Any]) -> None:
         """Set callback to app instance for project mode commands."""

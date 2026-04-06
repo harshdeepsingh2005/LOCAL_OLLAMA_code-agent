@@ -158,6 +158,31 @@ class TestCommandHandler:
         # Should signal exit somehow
         assert result is None or result == "exit" or handler._should_exit
 
+    def test_adaptive_command_uses_app_callback(self, handler):
+        """Adaptive command should query app callback and render status."""
+        called = {"ok": False}
+
+        def _callback(action, payload=None):
+            if action == "get_adaptive_status":
+                called["ok"] = True
+                return {
+                    "policy_profile": "balanced",
+                    "project_mode": False,
+                    "executor_active": False,
+                    "effective_max_tool_steps": "n/a",
+                    "require_reason_evidence": "n/a",
+                    "prefer_reliable_tools": "n/a",
+                    "hint_max_tool_steps_adjustment": 0,
+                    "recent_meta_reflections": [],
+                }
+            return None
+
+        handler.set_app_callback(_callback)
+        result = handler.handle("/adaptive")
+
+        assert called["ok"] is True
+        assert result is None
+
 
 class TestDisplay:
     """Tests for terminal display functionality."""

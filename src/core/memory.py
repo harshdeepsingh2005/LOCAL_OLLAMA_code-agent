@@ -1178,6 +1178,33 @@ class MemoryManager:
         compacted.sort(key=lambda row: str(row.get("timestamp", "")))
         return compacted[-120:]
 
+    def get_recent_meta_reflections(
+        self,
+        *,
+        limit: int = 5,
+        min_quality: float = 0.35,
+    ) -> list[dict[str, Any]]:
+        """Return recent quality-filtered meta reflections for operator visibility."""
+        data = self._load_memory(self._project_memory_file)
+        reflections = list(data.get("meta_reflections", []))
+        filtered: list[dict[str, Any]] = []
+        for item in reflections:
+            quality = self._reflection_quality(item)
+            if quality < max(0.0, min(1.0, min_quality)):
+                continue
+            filtered.append(
+                {
+                    "task": str(item.get("task", ""))[:200],
+                    "priority": str(item.get("priority", "medium"))[:32],
+                    "diagnosis": str(item.get("diagnosis", ""))[:240],
+                    "quality_score": round(quality, 3),
+                    "strategy_updates": [str(v)[:180] for v in item.get("strategy_updates", [])[:3]],
+                    "timestamp": str(item.get("timestamp", ""))[:64],
+                }
+            )
+        filtered.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+        return filtered[: max(1, int(limit))]
+
     def format_learned_patterns(self, task_description: str, max_chars: int = 1500) -> str:
         retrieved = self.retrieve_relevant_patterns(task_description)
         failures = retrieved.get("failures", [])
