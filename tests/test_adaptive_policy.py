@@ -23,6 +23,24 @@ def test_memory_derives_tightening_hints(tmp_path):
     assert hints["require_reason_evidence"] is True
 
 
+def test_memory_ignores_low_signal_reflections_for_hints(tmp_path):
+    memory = MemoryManager(workspace_root=tmp_path)
+    for _ in range(6):
+        memory.record_meta_reflection(
+            task_description="minor formatting",
+            success=True,
+            termination_reason="success",
+            diagnosis="ok",
+            priority="low",
+            strategy_updates=[],
+            confidence=0.02,
+        )
+
+    hints = memory.derive_policy_hints("tool plan evidence")
+    assert hints["max_tool_steps_adjustment"] == 0
+    assert hints["require_reason_evidence"] is False
+
+
 def test_executor_applies_adaptive_policy_constraints(tmp_path):
     cfg = get_config()
     log_dir = tmp_path / "logs"

@@ -1032,19 +1032,20 @@ class MemoryManager:
         """Persist post-run reflection signals for future planning improvements."""
         data = self._load_memory(self._project_memory_file)
         reflections = list(data.get("meta_reflections", []))
-        reflections.append(
-            {
-                "task": task_description[:200],
-                "success": bool(success),
-                "termination_reason": termination_reason[:100],
-                "diagnosis": diagnosis[:240],
-                "priority": priority[:32],
-                "strategy_updates": [str(item)[:180] for item in (strategy_updates or [])[:8]],
-                "confidence": max(0.0, min(1.0, float(confidence))),
-                "timestamp": self._now_iso(),
-            }
-        )
-        data["meta_reflections"] = reflections[-120:]
+        normalized_updates = [str(item)[:180] for item in (strategy_updates or [])[:8]]
+        record = {
+            "task": task_description[:200],
+            "success": bool(success),
+            "termination_reason": termination_reason[:100],
+            "diagnosis": diagnosis[:240],
+            "priority": priority[:32],
+            "strategy_updates": normalized_updates,
+            "confidence": max(0.0, min(1.0, float(confidence))),
+            "timestamp": self._now_iso(),
+        }
+        record["quality_score"] = round(self._reflection_quality(record), 3)
+        reflections.append(record)
+        data["meta_reflections"] = self._compact_meta_reflections(reflections)
         self._save_memory(self._project_memory_file, data)
         return ActionStatus.SUCCESS
 
@@ -1064,9 +1065,12 @@ class MemoryManager:
             )
             confidence = float(item.get("confidence", 0.0))
             recency = 0.2 if str(item.get("timestamp", "")) else 0.0
-            return (0.6 * overlap) + (0.3 * confidence) + recency
+            quality = self._reflection_quality(item)
+            return (0.45 * overlap) + (0.2 * confidence) + (0.25 * quality) + recency
 
-        ranked = sorted(reflections, key=_score, reverse=True)[:4]
+        ranked = [item for item in sorted(reflections, key=_score, reverse=True) if self._reflection_quality(item) >= 0.35][:4]
+        if not ranked:
+            return ""
         lines = ["## Meta Reflections"]
         for item in ranked:
             diagnosis = str(item.get("diagnosis", "")).strip()
@@ -1084,7 +1088,11 @@ class MemoryManager:
     def derive_policy_hints(self, task_description: str) -> dict[str, Any]:
         """Infer adaptive policy recommendations from historical outcomes."""
         data = self._load_memory(self._project_memory_file)
-        reflections = list(data.get("meta_reflections", []))[-20:]
+        reflections = [
+            item
+            for item in list(data.get("meta_reflections", []))[-30:]
+            if self._reflection_quality(item) >= 0.4
+        ]
         tool_signals = list(data.get("tool_signals", []))[-40:]
 
         task_tokens = self._tokenize(task_description)
@@ -1127,6 +1135,48 @@ class MemoryManager:
             "require_reason_evidence": tighten_signals >= 2 or high_priority_count >= 2,
             "prefer_reliable_tools": unreliable_tools >= 2,
         }
+
+    def _reflection_quality(self, item: dict[str, Any]) -> float:
+        """Estimate signal quality of a meta-reflection (0.0-1.0)."""
+        cached = item.get("quality_score")
+        if isinstance(cached, (int, float)):
+            return max(0.0, min(1.0, float(cached)))
+
+        confidence = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
+        updates = [str(v).strip() for v in item.get("strategy_updates", []) if str(v).strip()]
+        richness = min(1.0, len(updates) / 3.0)
+        diagnosis = str(item.get("diagnosis", "")).strip().lower()
+        informative = 0.0
+        if any(token in diagnosis for token in ("failed", "stagnation", "violation", "risk", "regression")):
+            informative = 1.0
+        elif any(token in diagnosis for token in ("stable", "succeeded", "success")):
+            informative = 0.5
+
+        priority = str(item.get("priority", "")).lower()
+        priority_weight = {"high": 1.0, "medium": 0.7, "low": 0.45}.get(priority, 0.5)
+
+        score = (0.4 * confidence) + (0.25 * richness) + (0.2 * informative) + (0.15 * priority_weight)
+        return max(0.0, min(1.0, score))
+
+    def _compact_meta_reflections(self, reflections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Retain strong reflections while decaying low-signal entries over time."""
+        if not reflections:
+            return []
+
+        enriched: list[dict[str, Any]] = []
+        for item in reflections:
+            row = dict(item)
+            row["quality_score"] = round(self._reflection_quality(row), 3)
+            enriched.append(row)
+
+        high_quality = [row for row in enriched if float(row.get("quality_score", 0.0)) >= 0.55]
+        medium_quality = [row for row in enriched if 0.35 <= float(row.get("quality_score", 0.0)) < 0.55]
+        low_quality = [row for row in enriched if float(row.get("quality_score", 0.0)) < 0.35]
+
+        # Keep full high-quality history, only bounded recent medium/low quality entries.
+        compacted = high_quality[-90:] + medium_quality[-20:] + low_quality[-6:]
+        compacted.sort(key=lambda row: str(row.get("timestamp", "")))
+        return compacted[-120:]
 
     def format_learned_patterns(self, task_description: str, max_chars: int = 1500) -> str:
         retrieved = self.retrieve_relevant_patterns(task_description)

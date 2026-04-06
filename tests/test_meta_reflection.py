@@ -41,3 +41,34 @@ def test_memory_stores_meta_reflections(tmp_path):
     rendered = memory.format_meta_reflections("context ranking optimization")
     assert "## Meta Reflections" in rendered
     assert "retain current strategy profile" in rendered
+
+
+def test_memory_filters_low_signal_reflections_from_render(tmp_path):
+    memory = MemoryManager(workspace_root=tmp_path)
+
+    for _ in range(3):
+        memory.record_meta_reflection(
+            task_description="noop",
+            success=True,
+            termination_reason="success",
+            diagnosis="ok",
+            priority="low",
+            strategy_updates=[],
+            confidence=0.05,
+        )
+
+    rendered = memory.format_meta_reflections("unrelated task")
+    assert rendered == ""
+
+    memory.record_meta_reflection(
+        task_description="stabilize planner",
+        success=False,
+        termination_reason="fatal_error",
+        diagnosis="Run failed due to stagnation and violation risk",
+        priority="high",
+        strategy_updates=["tighten planner tool-plan precision with stronger evidence requirements"],
+        confidence=0.9,
+    )
+    rendered = memory.format_meta_reflections("planner evidence")
+    assert "## Meta Reflections" in rendered
+    assert "tighten planner tool-plan precision" in rendered
