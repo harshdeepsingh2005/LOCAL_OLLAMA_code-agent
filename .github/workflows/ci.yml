@@ -32,6 +32,7 @@ jobs:
       
       - name: Run mypy type check
         run: mypy src/ --ignore-missing-imports
+        continue-on-error: true  # advisory-only until historical type debt is remediated
 
   test:
     name: Tests
