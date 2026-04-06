@@ -511,6 +511,9 @@ class ValidationLayer:
         "implement",
         "remove",
         "create",
+        "write",
+        "generate",
+        "build",
         "optimize",
         "document",
     }
