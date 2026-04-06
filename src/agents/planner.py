@@ -32,7 +32,7 @@ from src.agents.base import (
     ToolPlanStep,
     ToolCall,
 )
-from src.agents.json_utils import parse_json_object
+from src.agents.json_utils import parse_json_object, parse_json_value
 from src.core.agent_tools import TOOL_SCHEMAS, get_tools_system_prompt
 
 
@@ -42,7 +42,7 @@ ALLOWED_TOOL_NAMES: set[str] = {schema["name"] for schema in TOOL_SCHEMAS if "na
 class PlannerSubtaskSchema(BaseModel):
     """Schema for a planner-produced subtask before conversion to contracts."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str = Field(min_length=1)
     title: str = Field(min_length=5, max_length=200)
@@ -59,7 +59,7 @@ class PlannerSubtaskSchema(BaseModel):
 class PlannerToolCallSchema(BaseModel):
     """Schema for planner tool calls."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
@@ -68,7 +68,7 @@ class PlannerToolCallSchema(BaseModel):
 class PlannerToolPlanStepSchema(BaseModel):
     """Schema for one deterministic tool-plan step."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     tool: str = Field(min_length=1)
     reason: str = Field(min_length=3)
@@ -79,7 +79,7 @@ class PlannerToolPlanStepSchema(BaseModel):
 class PlannerSubtaskToolPlanSchema(BaseModel):
     """Schema for bounded deterministic tool-plan emitted for a subtask."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     steps: list[PlannerToolPlanStepSchema] = Field(default_factory=list, max_length=3)
 
@@ -311,9 +311,15 @@ You MUST respond with a valid JSON object in this exact format:
     ) -> PlannerOutput:
         """Parse LLM response into PlannerOutput."""
         try:
-            data = parse_json_object(response)
-            if not isinstance(data, dict):
-                raise TypeError("Planner response root must be a JSON object")
+            data_any = parse_json_value(response)
+            if isinstance(data_any, list):
+                data: dict[str, Any] = {"subtasks": data_any}
+            elif isinstance(data_any, dict):
+                data = dict(data_any)
+            else:
+                raise TypeError("Planner response root must be an object or list")
+
+            data = self._coerce_response_shape(data, input_data.task_description)
 
             schema = PlannerResponseSchema.model_validate(data)
 
@@ -402,6 +408,21 @@ You MUST respond with a valid JSON object in this exact format:
             )
             
         except (json.JSONDecodeError, KeyError, TypeError, ValidationError) as e:
+            # Attempt conservative salvage for malformed/non-JSON planner output.
+            recoverable = not isinstance(e, TypeError) or any(
+                token in str(e).lower()
+                for token in ["json", "root", "validation", "field required", "no subtasks"]
+            )
+            if recoverable:
+                recovered = self._salvage_minimal_plan(response, input_data)
+                if recovered is not None:
+                    if context.telemetry:
+                        context.telemetry.record_warning(
+                            "planner_response_salvaged",
+                            context={"error": str(e)[:240]},
+                        )
+                    return recovered
+
             # Return with parsing error
             return PlannerOutput(
                 task_id=input_data.task_id,
@@ -409,6 +430,146 @@ You MUST respond with a valid JSON object in this exact format:
                 error=f"Failed to parse planner response: {e}",
                 error_context={"raw_response": response[:1000]},
             )
+
+    @staticmethod
+    def _coerce_response_shape(data: dict[str, Any], task_description: str) -> dict[str, Any]:
+        """Coerce loosely-structured planner payloads into canonical schema-friendly shape."""
+        normalized: dict[str, Any] = dict(data)
+
+        if "plan_summary" not in normalized:
+            normalized["plan_summary"] = str(
+                normalized.get("summary")
+                or normalized.get("approach")
+                or normalized.get("plan")
+                or "Generated implementation plan"
+            )[:500]
+
+        subtasks_raw = normalized.get("subtasks")
+        if not isinstance(subtasks_raw, list):
+            subtasks_raw = normalized.get("tasks") if isinstance(normalized.get("tasks"), list) else []
+
+        canonical_subtasks: list[dict[str, Any]] = []
+        for idx, item in enumerate(subtasks_raw, 1):
+            if isinstance(item, str):
+                item = {"title": item, "description": item}
+            if not isinstance(item, dict):
+                continue
+
+            title = str(item.get("title") or item.get("name") or f"Task {idx}").strip()
+            if len(title) < 5:
+                title = (task_description.strip().split("\n", 1)[0] or f"Task {idx}")[:80]
+
+            description = str(item.get("description") or item.get("details") or title).strip()
+            if len(description) < 10:
+                description = f"Implement: {title}"
+
+            criteria = item.get("acceptance_criteria") or item.get("criteria") or item.get("checks") or []
+            if isinstance(criteria, str):
+                criteria = [criteria]
+            if not isinstance(criteria, list):
+                criteria = []
+            criteria = [str(c).strip() for c in criteria if str(c).strip()]
+            if not criteria:
+                criteria = [f"{title} is implemented and verifiable"]
+
+            target_files = item.get("target_files") or item.get("files") or item.get("file_paths") or []
+            if isinstance(target_files, str):
+                target_files = [target_files]
+            if not isinstance(target_files, list):
+                target_files = []
+
+            dependencies = item.get("dependencies") or []
+            if isinstance(dependencies, str):
+                dependencies = [dependencies]
+            if not isinstance(dependencies, list):
+                dependencies = []
+
+            canonical_subtasks.append(
+                {
+                    "id": str(item.get("id") or idx),
+                    "title": title[:200],
+                    "description": description[:1000],
+                    "acceptance_criteria": criteria,
+                    "target_files": [str(path) for path in target_files if str(path).strip()],
+                    "dependencies": [str(dep) for dep in dependencies],
+                    "tool_plan": item.get("tool_plan"),
+                    "estimated_complexity": str(
+                        item.get("estimated_complexity")
+                        or item.get("complexity")
+                        or "medium"
+                    ),
+                    "estimated_iterations": item.get("estimated_iterations")
+                    if isinstance(item.get("estimated_iterations"), int)
+                    else item.get("iterations") if isinstance(item.get("iterations"), int) else None,
+                    "fallback_strategy": item.get("fallback_strategy") or item.get("fallback"),
+                }
+            )
+
+        normalized["subtasks"] = canonical_subtasks
+
+        if "identified_risks" not in normalized:
+            risks = normalized.get("risks") or []
+            if isinstance(risks, str):
+                risks = [risks]
+            normalized["identified_risks"] = [str(r) for r in risks] if isinstance(risks, list) else []
+
+        if "assumptions" not in normalized:
+            assumptions = normalized.get("notes") or []
+            if isinstance(assumptions, str):
+                assumptions = [assumptions]
+            normalized["assumptions"] = [str(a) for a in assumptions] if isinstance(assumptions, list) else []
+
+        if "tool_calls" not in normalized:
+            tc = normalized.get("toolCalls") or []
+            normalized["tool_calls"] = tc if isinstance(tc, list) else []
+
+        if "requires_clarification" not in normalized:
+            normalized["requires_clarification"] = bool(normalized.get("clarification_questions"))
+
+        if "clarification_questions" not in normalized:
+            normalized["clarification_questions"] = []
+
+        return normalized
+
+    def _salvage_minimal_plan(
+        self,
+        response: str,
+        input_data: PlannerInput,
+    ) -> PlannerOutput | None:
+        """Return a minimal executable plan when planner output is malformed text."""
+        text = (response or "").strip()
+        if not text:
+            return None
+
+        headline = input_data.task_description.strip().split("\n", 1)[0][:120] or "Implement requested change"
+        relevant = input_data.workspace_context.get("relevant_files", []) if isinstance(input_data.workspace_context, dict) else []
+        target_files = [str(p) for p in relevant[:3]] if isinstance(relevant, list) else []
+
+        subtask = Subtask(
+            id="1",
+            title=headline if len(headline) >= 5 else "Implement requested change",
+            description=(text[:900] if len(text) >= 10 else input_data.task_description[:900]),
+            acceptance_criteria=["Task requirements are implemented and validated"],
+            target_files=target_files,
+            dependencies=[],
+            estimated_complexity="medium",
+            estimated_iterations=2,
+            fallback_strategy="scope_reduce",
+        )
+
+        return PlannerOutput(
+            task_id=input_data.task_id,
+            status=AgentStatus.SUCCESS,
+            plan_summary="Recovered plan from malformed planner output.",
+            subtasks=[subtask],
+            identified_risks=[
+                "Planner output was malformed/non-JSON; generated conservative recovery plan.",
+            ],
+            assumptions=["Recovery mode used due to malformed planner response."],
+            requires_clarification=False,
+            clarification_questions=[],
+            tool_calls=[],
+        )
     
     def _create_error_output(
         self,

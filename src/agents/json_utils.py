@@ -21,21 +21,26 @@ def extract_json_payload(response: str) -> str:
         if candidate:
             return candidate
 
-    obj = _find_first_json_object(text)
-    return obj if obj else text
+    value = _find_first_json_value(text)
+    return value if value else text
 
 
 def parse_json_object(response: str) -> dict[str, Any]:
     """Parse a JSON object from LLM output with self-healing repairs."""
+    data = parse_json_value(response)
+    if not isinstance(data, dict):
+        raise TypeError("JSON root must be an object")
+    return data
+
+
+def parse_json_value(response: str) -> Any:
+    """Parse any JSON value from LLM output with self-healing repairs."""
     payload = extract_json_payload(response)
     try:
         data = json.loads(payload)
     except json.JSONDecodeError:
         repaired = _repair_json(payload)
         data = json.loads(repaired)
-
-    if not isinstance(data, dict):
-        raise TypeError("JSON root must be an object")
     return data
 
 
@@ -80,6 +85,58 @@ def _find_first_json_object(text: str) -> str | None:
             depth += 1
             continue
         if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+
+    return None
+
+
+def _find_first_json_value(text: str) -> str | None:
+    """Find the first balanced top-level JSON object or array in text."""
+    obj = _find_first_json_object(text)
+    arr = _find_first_json_array(text)
+
+    if obj is None:
+        return arr
+    if arr is None:
+        return obj
+
+    obj_idx = text.find(obj)
+    arr_idx = text.find(arr)
+    return obj if (0 <= obj_idx < arr_idx or arr_idx == -1) else arr
+
+
+def _find_first_json_array(text: str) -> str | None:
+    start = text.find("[")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for idx in range(start, len(text)):
+        ch = text[idx]
+
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "[":
+            depth += 1
+            continue
+        if ch == "]":
             depth -= 1
             if depth == 0:
                 return text[start : idx + 1]

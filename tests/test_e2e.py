@@ -1379,7 +1379,7 @@ class TestPlannerHardening:
                 return executor._planner, ctx
 
         def test_planner_no_masking_on_empty_plan(self, workspace):
-                """Planner should fail (not mask) when model returns no subtasks/tool_calls/clarification."""
+                """Planner should recover with conservative plan when model returns empty structured payload."""
                 from src.agents import AgentStatus, PlannerInput
 
                 planner, ctx = self._planner_context(workspace)
@@ -1398,8 +1398,9 @@ class TestPlannerHardening:
                         ctx,
                 )
 
-                assert output.status == AgentStatus.FAILED
-                assert "no subtasks" in (output.error or "").lower()
+                assert output.status == AgentStatus.SUCCESS
+                assert output.subtasks
+                assert output.plan_summary.lower().startswith("recovered plan")
 
         def test_planner_does_not_merge_simple_task_subtasks(self, workspace):
                 """Planner should preserve model subtasks and avoid implicit merge masking."""
@@ -1558,6 +1559,57 @@ class TestPlannerHardening:
                 assert output.subtasks
                 assert output.subtasks[0].estimated_iterations == 4
                 assert output.subtasks[0].fallback_strategy == "targeted_replan"
+
+        def test_planner_coerces_list_root_payload(self, workspace):
+                """Planner should recover when model returns a top-level JSON list of tasks."""
+                from src.agents import AgentStatus, PlannerInput
+
+                planner, ctx = self._planner_context(workspace)
+                planner_input = PlannerInput(
+                        task_id="planning",
+                        run_id="run_planner_hardening",
+                        task_description="Document architecture",
+                        workspace_context={"relevant_files": ["README.md"]},
+                )
+
+                output = planner._parse_response(
+                        """[
+                            {
+                                "title": "Document architecture",
+                                "description": "Write architecture summary in README.",
+                                "files": ["README.md"]
+                            }
+                        ]""",
+                        planner_input,
+                        ctx,
+                )
+
+                assert output.status == AgentStatus.SUCCESS
+                assert len(output.subtasks) == 1
+                assert output.subtasks[0].target_files == ["README.md"]
+
+        def test_planner_salvages_malformed_non_json_response(self, workspace):
+                """Planner should generate conservative recovery plan for malformed non-JSON text."""
+                from src.agents import AgentStatus, PlannerInput
+
+                planner, ctx = self._planner_context(workspace)
+                planner_input = PlannerInput(
+                    task_id="planning",
+                    run_id="run_planner_hardening",
+                    task_description="Summarize architecture in README",
+                    workspace_context={"relevant_files": ["README.md", "docs/architecture.md"]},
+                )
+
+                output = planner._parse_response(
+                    "Plan:\n1) review architecture docs\n2) summarize findings in markdown bullets",
+                    planner_input,
+                    ctx,
+                )
+
+                assert output.status == AgentStatus.SUCCESS
+                assert output.plan_summary.lower().startswith("recovered plan")
+                assert output.subtasks
+                assert any("malformed" in risk.lower() for risk in output.identified_risks)
 
 
 class TestBaseAgentStability:
