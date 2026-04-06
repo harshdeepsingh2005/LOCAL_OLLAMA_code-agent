@@ -643,10 +643,33 @@ class Executor:
 
     def _refresh_adaptive_policy(self, task_description: str) -> None:
         """Refresh adaptive policy knobs from persisted historical outcomes."""
+        prev_steps = self._adaptive_max_tool_steps
+        prev_require_evidence = self._adaptive_require_reason_evidence
+        prev_prefer_reliable = self._adaptive_prefer_reliable_tools
+
         if self._memory_manager is None:
             self._adaptive_max_tool_steps = max(1, self._policy_profile.max_tool_steps)
             self._adaptive_require_reason_evidence = False
             self._adaptive_prefer_reliable_tools = False
+            if self._telemetry:
+                self._telemetry.record_warning(
+                    "adaptive_policy_applied",
+                    {
+                        "base_profile": self._policy_profile.name,
+                        "task": task_description[:180],
+                        "changed": any(
+                            [
+                                prev_steps != self._adaptive_max_tool_steps,
+                                prev_require_evidence != self._adaptive_require_reason_evidence,
+                                prev_prefer_reliable != self._adaptive_prefer_reliable_tools,
+                            ]
+                        ),
+                        "effective_max_tool_steps": self._adaptive_max_tool_steps,
+                        "require_reason_evidence": self._adaptive_require_reason_evidence,
+                        "prefer_reliable_tools": self._adaptive_prefer_reliable_tools,
+                        "source": "profile_default",
+                    },
+                )
             return
 
         hints = self._memory_manager.derive_policy_hints(task_description)
@@ -655,6 +678,26 @@ class Executor:
         self._adaptive_max_tool_steps = max(1, min(6, base + adjustment))
         self._adaptive_require_reason_evidence = bool(hints.get("require_reason_evidence", False))
         self._adaptive_prefer_reliable_tools = bool(hints.get("prefer_reliable_tools", False))
+        if self._telemetry:
+            self._telemetry.record_warning(
+                "adaptive_policy_applied",
+                {
+                    "base_profile": self._policy_profile.name,
+                    "task": task_description[:180],
+                    "changed": any(
+                        [
+                            prev_steps != self._adaptive_max_tool_steps,
+                            prev_require_evidence != self._adaptive_require_reason_evidence,
+                            prev_prefer_reliable != self._adaptive_prefer_reliable_tools,
+                        ]
+                    ),
+                    "effective_max_tool_steps": self._adaptive_max_tool_steps,
+                    "require_reason_evidence": self._adaptive_require_reason_evidence,
+                    "prefer_reliable_tools": self._adaptive_prefer_reliable_tools,
+                    "hints": hints,
+                    "source": "memory_hints",
+                },
+            )
 
     def _is_tool_result_success(self, result: str) -> bool:
         """Best-effort success check for string-based tool results."""
@@ -1318,6 +1361,8 @@ class Executor:
             if validation_errors:
                 result.error = "; ".join(validation_errors)
                 return result
+
+            self._refresh_adaptive_policy(task_description)
 
             self._active_route = self._task_router.route(task_description)
             fast_map = self._run_fast_map(task_description)
