@@ -545,23 +545,81 @@ You MUST respond with a valid JSON object in this exact format:
         relevant = input_data.workspace_context.get("relevant_files", []) if isinstance(input_data.workspace_context, dict) else []
         target_files = [str(p) for p in relevant[:3]] if isinstance(relevant, list) else []
 
-        subtask = Subtask(
-            id="1",
-            title=headline if len(headline) >= 5 else "Implement requested change",
-            description=(text[:900] if len(text) >= 10 else input_data.task_description[:900]),
-            acceptance_criteria=["Task requirements are implemented and validated"],
-            target_files=target_files,
-            dependencies=[],
-            estimated_complexity="medium",
-            estimated_iterations=2,
-            fallback_strategy="scope_reduce",
-        )
+        # Recover explicit step lines from malformed plain text plans.
+        raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        step_lines: list[str] = []
+        for line in raw_lines:
+            numbered = re.sub(r"^\s*(?:step\s*)?\d+[\).:\-\s]+", "", line, flags=re.IGNORECASE).strip()
+            bulleted = re.sub(r"^\s*[-*•]+\s+", "", line).strip()
+            candidate = numbered if numbered != line else bulleted
+            if not candidate or len(candidate) < 8:
+                continue
+            lowered = candidate.lower()
+            if lowered in {"plan", "steps"}:
+                continue
+            # Skip JSON-like fragments (common malformed LLM traces).
+            if re.match(r'^["\{\[\]},]', candidate):
+                continue
+            if re.match(r'^"?[a-zA-Z0-9_\- ]+"?\s*:\s*[\{\["\d-]', candidate):
+                continue
+            alpha_chars = sum(1 for ch in candidate if ch.isalpha())
+            if alpha_chars < 6:
+                continue
+            if alpha_chars / max(1, len(candidate)) < 0.35:
+                continue
+            step_lines.append(candidate)
+
+        # Deduplicate while preserving order and cap for stability.
+        seen: set[str] = set()
+        deduped_steps: list[str] = []
+        for step in step_lines:
+            key = step.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped_steps.append(step)
+        deduped_steps = deduped_steps[:6]
+
+        subtasks: list[Subtask] = []
+        if deduped_steps:
+            for idx, step in enumerate(deduped_steps, 1):
+                title = step[:120]
+                if len(title) < 5:
+                    title = f"Task {idx}"
+                subtasks.append(
+                    Subtask(
+                        id=str(idx),
+                        title=title,
+                        description=step[:900],
+                        acceptance_criteria=[f"Step {idx} implemented and verifiable"],
+                        target_files=target_files,
+                        dependencies=[str(idx - 1)] if idx > 1 else [],
+                        estimated_complexity="medium",
+                        estimated_iterations=1,
+                        fallback_strategy="scope_reduce",
+                    )
+                )
+
+        if not subtasks:
+            subtasks = [
+                Subtask(
+                    id="1",
+                    title=headline if len(headline) >= 5 else "Implement requested change",
+                    description=(text[:900] if len(text) >= 10 else input_data.task_description[:900]),
+                    acceptance_criteria=["Task requirements are implemented and validated"],
+                    target_files=target_files,
+                    dependencies=[],
+                    estimated_complexity="medium",
+                    estimated_iterations=2,
+                    fallback_strategy="scope_reduce",
+                )
+            ]
 
         return PlannerOutput(
             task_id=input_data.task_id,
             status=AgentStatus.SUCCESS,
             plan_summary="Recovered plan from malformed planner output.",
-            subtasks=[subtask],
+            subtasks=subtasks,
             identified_risks=[
                 "Planner output was malformed/non-JSON; generated conservative recovery plan.",
             ],

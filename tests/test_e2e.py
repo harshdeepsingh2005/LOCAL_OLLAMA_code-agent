@@ -1611,6 +1611,28 @@ class TestPlannerHardening:
                 assert output.subtasks
                 assert any("malformed" in risk.lower() for risk in output.identified_risks)
 
+        def test_planner_salvage_expands_numbered_steps(self, workspace):
+                """Recovered planner output should preserve numbered steps as separate subtasks."""
+                from src.agents import AgentStatus, PlannerInput
+
+                planner, ctx = self._planner_context(workspace)
+                planner_input = PlannerInput(
+                    task_id="planning",
+                    run_id="run_planner_hardening",
+                    task_description="Harden planner parsing",
+                    workspace_context={"relevant_files": ["src/agents/planner.py"]},
+                )
+
+                output = planner._parse_response(
+                    "Plan:\n1) Inspect parser edge-cases\n2) Add recovery for malformed payloads\n3) Add regression tests",
+                    planner_input,
+                    ctx,
+                )
+
+                assert output.status == AgentStatus.SUCCESS
+                assert len(output.subtasks) >= 3
+                assert output.subtasks[0].title.lower().startswith("inspect parser")
+
 
 class TestBaseAgentStability:
     """Base agent reliability controls: retries, timeout, sanitization, token management."""
