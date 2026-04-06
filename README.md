@@ -26,6 +26,7 @@ The objective is practical autonomy with clear operational guardrails.
 - Deterministic sequential multi-workspace orchestration (v1)
 - Meta-agent reflection + adaptive policy tuning loops
 - Query-aware context optimization with budgeted summarization
+- Planner malformed-output recovery with conservative plan salvage
 
 ## Repository structure
 
@@ -65,6 +66,7 @@ Interactive commands:
 
 - `/profile` (show active profile)
 - `/profile strict|balanced|permissive` (switch profile)
+- `/adaptive` (show adaptive policy + recent meta-reflection state)
 - `/workspaces list|add <path>|clear` (configure multi-workspace list)
 
 ## Typical workflow
